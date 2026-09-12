@@ -1,0 +1,63 @@
+[package]
+name        = "grpc-nv"
+version     = "0.0.1"
+description = "The host half of gRPC, over grpc-codec-nv's action list: the four call shapes as values a host pumps, deadlines against a real clock, metadata, status mapping, retries with a backoff policy, a channel over an endpoint, a server's routing, and the stub contract protobuf-nv's generator emits.  The HTTP/2 transport is a trait nothing implements yet.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `host`, and only two functions in the package name a concrete effect.
+# `grpcchan.now_nanos` reads a clock — `[time]`, and the only one —
+# because a deadline is the one thing gRPC cannot express as a value
+# the caller supplies without the caller reading a clock anyway.
+# `grpcchan.dial_tls` is `[net]`, `std.tls`'s own row.
+#
+# EVERYTHING ELSE THAT PERFORMS IS EFFECT-POLYMORPHIC over
+# `GrpcTransport[e]`, and the reason is written at the top of
+# `grpctrans.nv`: there is no HTTP/2 implementation in this project
+# yet, so this package cannot name the effects of a transport that does
+# not exist.  A trait with an effect parameter is the shape that lets
+# the design be published, checked and reviewed now and plugged into
+# `http2-nv` when it lands.
+layer       = "host"
+
+category    = "networking"
+
+tags        = ["grpc", "rpc", "client", "server", "streaming", "deadlines", "protobuf", "retries"]
+repository  = "https://github.com/novolang/grpc-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "gRPC with a socket, once there is an HTTP/2 to put it on"
+
+[dependencies]
+# The `core` half: the framing, the status codes, the metadata, the
+# deadline grammar and the call state machine all live there, and
+# `GrpcAction` is what it hands this package to perform.  Nothing here
+# does protocol arithmetic.
+grpc-codec-nv = "^0.0.1"
+
+# The descriptors a service is described by — `PbService`, `PbMethod`,
+# `PbStreaming`, `PbFileSet` — and `pbgen`, whose generated code is
+# what `grpcstub` defines the contract for.  grpc-codec-nv already
+# depends on it; naming it here is the rule that a package declares
+# what its own signatures mention.
+protobuf-nv = "^0.0.1"
+
+# NOT http-codec-nv, and NOT std.http, and the absence is the whole
+# design problem this package has.  HTTP/1.1 cannot carry gRPC:
+# trailers after a body, two independent directions at once, and
+# per-stream flow control are all required and 1.1 has none of the
+# three.  grpc-codec-nv's README names the missing row — `http2-nv`,
+# `core`/`networking` — and `grpctrans.GrpcTransport[e]` is the
+# interface it would implement.  Until then this package builds,
+# type-checks and connects to nothing.

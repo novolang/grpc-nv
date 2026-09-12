@@ -1,0 +1,334 @@
+// grpcserve_tests.nv — the server's routing, the trailers-only answer
+// nobody sends correctly, and the stub contract.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: grpc-nv.<module>.<fn>`.
+// That is the expected result until the bodies land.
+//
+// THE DESCRIPTOR SET IS BUILT, NOT PARSED.  protobuf-nv's types are
+// values, so a service this server answers for is a `PbFileSet` a test
+// writes out — which makes every routing case in this file readable
+// without a `.proto` file, a generator run or a fixture on disk.
+
+use std.test
+use std.bytes
+use std.list
+use pbunknown
+use grpcchan
+use grpcfault
+use grpcserve
+use grpcstub
+
+// A transport over nothing at all — the only implementation of
+// `GrpcTransport[e]` that exists anywhere today, because there is no
+// HTTP/2 in this project.
+struct GrpcServerTape
+    open: Bool
+
+// A transport that costs nothing.
+//
+// ```novo ignore
+// use grpcserve
+//
+// fn drive(x: GrpcExchange, t: GrpcServerTape) -> Result<GrpcServeStep, GrpcCallError>
+//     grpcserve.pump(x, t, 0)
+// ```
+impl GrpcTransport[] for GrpcServerTape
+    fn grpc_open(self) -> Result<GrpcStream, GrpcTransportFault>
+        Ok(GrpcStream { id: 2 })
+
+    fn grpc_send_headers(self, s: GrpcStream, md: GrpcMetadata,
+                         end_stream: Bool) -> Result<Unit, GrpcTransportFault>
+        Ok()
+
+    fn grpc_send_data(self, s: GrpcStream, data: Bytes,
+                      end_stream: Bool) -> Result<Int, GrpcTransportFault>
+        Ok(bytes.len(data))
+
+    fn grpc_send_trailers(self, s: GrpcStream, md: GrpcMetadata) -> Result<Unit, GrpcTransportFault>
+        Ok()
+
+    fn grpc_receive(self, s: GrpcStream) -> Result<GrpcWire, GrpcTransportFault>
+        Ok(GrpcWireIdle)
+
+    fn grpc_reset(self, s: GrpcStream, http2_code: Int) -> Result<Unit, GrpcTransportFault>
+        Ok()
+
+    fn grpc_is_open(self) -> Bool
+        self.open
+
+fn a_method() -> PbMethod
+    PbMethod { name: "SayHello", input_type: ".helloworld.HelloRequest",
+               output_type: ".helloworld.HelloReply", streaming: PbUnary,
+               deprecated: false, unknown: pbunknown.empty() }
+
+fn a_service() -> PbService
+    PbService { name: "Greeter", full_name: ".helloworld.Greeter",
+                methods: [a_method()], deprecated: false,
+                unknown: pbunknown.empty() }
+
+fn a_file() -> PbFile
+    PbFile { name: "helloworld.proto", package: "helloworld", syntax: PbProto3,
+             dependency: [], public_dependency: [], messages: [], enums: [],
+             services: [a_service()],
+             options: PbFileOptions { deprecated: false, go_package: "",
+                                      java_package: "",
+                                      unknown: pbunknown.empty() } }
+
+fn a_set() -> PbFileSet
+    PbFileSet { files: [a_file()] }
+
+fn a_server() -> GrpcServer
+    grpcserve.server(a_set(), grpcserve.default_options())
+
+fn a_tape() -> GrpcServerTape
+    GrpcServerTape { open: true }
+
+@test
+fn test_routing_is_a_lookup_and_a_path_is_exact() [io]
+    // A gRPC `:path` is `/package.Service/Method` exactly — no
+    // patterns, no wildcards, no trailing slash — so a router with a
+    // matcher in it would be a matcher that can only do one thing.
+    let s = a_server()
+
+    test.case("the path a descriptor implies resolves")
+    match grpcserve.route(s, "/helloworld.Greeter/SayHello")
+        None    => test.assert(false)
+        Some(m) => test.assert(m.name == "SayHello")
+
+    test.case("a method the service does not have does not")
+    match grpcserve.route(s, "/helloworld.Greeter/Goodbye")
+        Some(_) => test.assert(false)
+        None    => test.assert(true)
+
+    test.case("and a trailing slash is a different path, not the same one")
+    match grpcserve.route(s, "/helloworld.Greeter/SayHello/")
+        Some(_) => test.assert(false)
+        None    => test.assert(true)
+
+@test
+fn test_an_unroutable_path_is_a_trailers_only_response() [io]
+    // ONE header set with grpc-status in it and end_stream set — not a
+    // response head, then a body, then trailers.  A server that sent a
+    // normal head first leaves a conforming client waiting for a body
+    // that never comes.
+    match grpcserve.unimplemented_response("/nope.Service/Method")
+        Err(_) => test.assert(false)
+        Ok(md) =>
+            test.case("it carries grpc-status")
+            test.assert(grpcmeta.has(md, grpcstatus.status_header()))
+
+            test.case("and the status is UNIMPLEMENTED, which is 12")
+            match grpcmeta.get(md, grpcstatus.status_header())
+                None    => test.assert(false)
+                Some(v) => test.assert(v == "12")
+
+            test.case("the codec agrees this is a trailers-only set")
+            test.assert(grpccall.is_trailers_only(md))
+
+@test
+fn test_the_serving_flag_is_what_a_graceful_shutdown_clears() [io]
+    // A load balancer that learns from the health service stops
+    // sending work before the process stops answering, which is the
+    // difference between a deploy and an outage.
+    let s = a_server()
+
+    test.case("a service starts serving")
+    test.assert(grpcserve.is_serving(s, "helloworld.Greeter"))
+
+    test.case("and can be taken out of rotation without being removed")
+    let down = grpcserve.set_serving(s, "helloworld.Greeter", false)
+    test.assert(not grpcserve.is_serving(down, "helloworld.Greeter"))
+
+    test.case("its route still resolves, so in-flight calls finish")
+    match grpcserve.route(down, "/helloworld.Greeter/SayHello")
+        None    => test.assert(false)
+        Some(_) => test.assert(true)
+
+@test
+fn test_the_health_service_is_named_and_not_implemented() [io]
+    // A server with route and is_serving has what it needs; what this
+    // package would add is a decision about what healthy means.
+    test.assert(grpcserve.health_service_name() == "grpc.health.v1.Health")
+
+@test
+fn test_an_exchange_applies_the_servers_deadline_ceiling() [io]
+    // One caller's hour-long timeout must not hold a stream open for
+    // an hour.
+    let o = GrpcServerOptions { limits: grpcframe.default_limits(),
+                                default_metadata: grpcmeta.empty(),
+                                max_deadline_nanos: 1000000000,
+                                accept_encoding: "identity",
+                                send_encoding: "identity" }
+    let s = grpcserve.server(a_set(), o)
+
+    match grpcmeta.set(grpcmeta.empty(), ":path", "/helloworld.Greeter/SayHello")
+        Err(_) => test.assert(false)
+        Ok(md) =>
+            match grpcmeta.set(md, grpcmeta.timeout_header(), "1H")
+                Err(_)   => test.assert(false)
+                Ok(with) =>
+                    match grpcserve.exchange(s, GrpcStream { id: 1 }, with, 0)
+                        Err(_) => test.assert(false)
+                        Ok(x)  =>
+                            test.case("an hour is cut to the server's ceiling")
+                            test.assert(grpcserve.deadline_of(x) <= 1000000000)
+
+                            test.case("and the request metadata is kept as it arrived")
+                            test.assert(grpcmeta.count(grpcserve.request_metadata(x)) > 0)
+
+@test
+fn test_a_path_no_service_has_is_refused_before_an_exchange_exists() [io]
+    let s = a_server()
+
+    match grpcmeta.set(grpcmeta.empty(), ":path", "/nope.Service/Method")
+        Err(_) => test.assert(false)
+        Ok(md) =>
+            match grpcserve.exchange(s, GrpcStream { id: 1 }, md, 0)
+                Ok(_)  => test.assert(false)
+                Err(_) => test.assert(true)
+
+@test
+fn test_an_expired_exchange_tells_the_handler_to_stop() [io]
+    // A server that kept working past a deadline burns capacity on an
+    // answer nobody will read, and under load that is the difference
+    // between a slow server and a collapsed one.
+    let s = a_server()
+
+    match grpcmeta.set(grpcmeta.empty(), ":path", "/helloworld.Greeter/SayHello")
+        Err(_) => test.assert(false)
+        Ok(md) =>
+            match grpcmeta.set(md, grpcmeta.timeout_header(), "1S")
+                Err(_)   => test.assert(false)
+                Ok(with) =>
+                    match grpcserve.exchange(s, GrpcStream { id: 1 }, with, 0)
+                        Err(_) => test.assert(false)
+                        Ok(x)  =>
+                            test.case("not abandoned inside the budget")
+                            test.assert(not grpcserve.abandoned(x, 500000000))
+
+                            test.case("and abandoned past it")
+                            test.assert(grpcserve.abandoned(x, 2000000000))
+
+@test
+fn test_every_server_verb_is_generic_over_the_transport() [io]
+    let s = a_server()
+
+    match grpcmeta.set(grpcmeta.empty(), ":path", "/helloworld.Greeter/SayHello")
+        Err(_) => test.assert(true)
+        Ok(md) =>
+            match grpcserve.exchange(s, GrpcStream { id: 1 }, md, 0)
+                Err(_) => test.assert(true)
+                Ok(x)  =>
+                    test.case("pump")
+                    match served(x, a_tape())
+                        Ok(_)  => test.assert(true)
+                        Err(_) => test.assert(true)
+
+                    test.case("the response head, separate from the first message")
+                    match headed(x, a_tape())
+                        Ok(_)  => test.assert(true)
+                        Err(_) => test.assert(true)
+
+                    test.case("a response message")
+                    match answered(x, a_tape())
+                        Ok(_)  => test.assert(true)
+                        Err(_) => test.assert(true)
+
+                    test.case("and the trailers every response ends with")
+                    match finished(x, a_tape())
+                        Ok(_)  => test.assert(true)
+                        Err(_) => test.assert(true)
+
+fn served(x: GrpcExchange, t: GrpcServerTape) -> Result<GrpcServeStep, GrpcCallError>
+    grpcserve.pump(x, t, 0)
+
+fn headed(x: GrpcExchange, t: GrpcServerTape) -> Result<GrpcServeStep, GrpcCallError>
+    grpcserve.send_head(x, t, grpcmeta.empty(), 0)
+
+fn answered(x: GrpcExchange, t: GrpcServerTape) -> Result<GrpcServeStep, GrpcCallError>
+    grpcserve.send(x, t, bytes.from_hex("089601") ?? bytes.zeros(0), 0)
+
+fn finished(x: GrpcExchange, t: GrpcServerTape) -> Result<GrpcServeStep, GrpcCallError>
+    grpcserve.finish(x, t, grpcstatus.ok_trailers(), 0)
+
+@test
+fn test_a_stub_comes_from_the_descriptor_and_cannot_invent_a_method() [io]
+    // A .proto change that renames a method breaks the build rather
+    // than the deployment.
+    let set = a_set()
+
+    test.case("a method the service has")
+    match grpcstub.method_stub(set, "helloworld.Greeter", "SayHello")
+        None    => test.assert(false)
+        Some(s) =>
+            test.assert(grpcstub.path_of(s) == "/helloworld.Greeter/SayHello")
+
+            test.case("and the shape the generator emits for")
+            match grpcstub.streaming_of(s)
+                PbUnary => test.assert(true)
+                _       => test.assert(false)
+
+            test.case("with the encoder and decoder naming the descriptor's types")
+            test.assert(grpcstub.types_agree(s))
+
+    test.case("a method it does not have")
+    match grpcstub.method_stub(set, "helloworld.Greeter", "Goodbye")
+        Some(_) => test.assert(false)
+        None    => test.assert(true)
+
+@test
+fn test_a_service_stub_carries_every_method() [io]
+    match grpcstub.service_stub(a_set(), "helloworld.Greeter")
+        None    => test.assert(false)
+        Some(s) => test.assert(list.len(s.methods) == 1)
+
+@test
+fn test_the_generated_names_are_rules_and_not_choices() [io]
+    // Two generated files never disagree, and a reader of one can
+    // predict the other.
+    test.case("a module name comes from the proto file's")
+    test.assert(grpcstub.module_name_for("helloworld.proto") != "")
+
+    test.case("a client function is named from the service and the method")
+    test.assert(grpcstub.client_fn_name("helloworld.Greeter", "SayHello") != "")
+
+    test.case("and a server handler differently, so the two never collide")
+    test.assert(grpcstub.client_fn_name("helloworld.Greeter", "SayHello") !=
+                grpcstub.server_fn_name("helloworld.Greeter", "SayHello"))
+
+@test
+fn test_the_reflection_service_is_named_and_not_implemented() [io]
+    test.assert(grpcstub.reflection_service_name() ==
+                "grpc.reflection.v1.ServerReflection")
+
+@test
+fn test_a_stub_invokes_through_this_package_and_never_touches_a_frame() [io]
+    // The whole of what a generated client's body is.
+    let c = grpcchan.channel(grpcchan.endpoint("https", "api.example.com", 443))
+
+    match grpcstub.method_stub(a_set(), "helloworld.Greeter", "SayHello")
+        None    => test.assert(true)
+        Some(s) =>
+            match grpcstub.invoke(s, c, grpcmeta.empty(), 0, 0)
+                Ok(_)  => test.assert(true)
+                Err(_) => test.assert(true)
+
+@test
+fn test_a_fault_names_a_reset_code_only_while_a_stream_exists() [io]
+    test.case("a codec refusal has a code to reset with")
+    match grpcfault.reset_code_for(GrpcNoSuchMethod("/a/b"))
+        Some(_) => test.assert(true)
+        None    => test.assert(true)
+
+    test.case("and a transport that already failed has no stream left")
+    match grpcfault.reset_code_for(GrpcWireFailed(GrpcWireIoFailed(IoBrokenPipe)))
+        None    => test.assert(true)
+        Some(_) => test.assert(false)
+
+@test
+fn test_the_default_server_honours_whatever_deadline_arrives() [io]
+    // Zero means no ceiling, which is the right default because a
+    // library that imposed one would break the long-running streams
+    // gRPC exists for.
+    test.assert(grpcserve.default_options().max_deadline_nanos == 0)

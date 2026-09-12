@@ -1,0 +1,326 @@
+// grpcserve.nv — the server: a routing table, and one exchange as a
+// value.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// ROUTING IS A LOOKUP AND NOT A ROUTER.  A gRPC `:path` is
+// `/package.Service/Method` exactly — no patterns, no wildcards, no
+// path parameters, no trailing slash — so a router with a matcher in
+// it would be a matcher that can only ever do one thing.
+// `grpcsvc.parse_path` splits it and `route` is a lookup over the
+// descriptors, and both are `[]`.
+//
+// AN UNROUTABLE PATH IS A TRAILERS-ONLY RESPONSE, and that is the
+// server-side half of the mistake grpc-codec-nv's README names.  A
+// server answering `UNIMPLEMENTED` sends ONE header set with
+// `grpc-status` in it and `end_stream` set — not a head, then a body,
+// then trailers.  A server that sent a normal response head first
+// leaves a conforming client waiting for a body that is never coming,
+// and `grpccall.trailers_only` is what builds it.
+//
+// THE HANDLER IS NOT A CALLBACK.  `GrpcExchange` is a value the
+// server's own loop drives, for the reason `WsUpgradeOutcome` is a
+// value in websocket-nv: a handler taken as a function would have to
+// be given the server's authentication, its rate limiting, its tracing
+// and its cancellation as options this package does not understand.
+// What this package does is turn a stream into an exchange and an
+// exchange's answers into actions; what a request MEANS is the
+// server's.
+//
+// AND A SERVER MUST DECREMENT A FORWARDED DEADLINE.  `grpc-timeout` is
+// a duration from receipt, so a server that is itself a client — which
+// is most of them — passes `grpcchan.forwarded_deadline` to the next
+// hop and not the number that arrived.
+
+// One service the server can answer for.
+pub struct GrpcServiceEntry
+    // The descriptor, from protobuf-nv by way of `grpcsvc`.
+    service: GrpcServiceDesc
+    // Whether this service is currently accepting calls.  A health
+    // check that answered from a field is a health check that reports
+    // what the process believes rather than what it can do, so this is
+    // a flag the server sets and the health service reads.
+    serving: Bool
+
+// Everything the server decides once.
+pub struct GrpcServerOptions
+    // The codec's framing limits.
+    limits: GrpcLimits
+    // Metadata every response carries.
+    default_metadata: GrpcMetadata
+    // The longest deadline this server will honour, in nanoseconds.  A
+    // client asking for more gets this instead, which is what stops one
+    // caller's hour-long timeout from holding a stream open for an
+    // hour.  Zero means honour whatever arrives.
+    max_deadline_nanos: Int
+    // The compression this server accepts and the one it sends with.
+    accept_encoding: Str
+    send_encoding: Str
+
+// A server: what it can answer, and how.
+pub struct GrpcServer
+    services: [GrpcServiceEntry]
+    options: GrpcServerOptions
+
+// One call being answered.
+pub struct GrpcExchange
+    // The codec's state machine, on the server side.
+    call: GrpcCall
+    stream: GrpcStream
+    // The method this path resolved to.
+    method: GrpcMethodDesc
+    // The request metadata as it arrived, before anything was applied
+    // to it.  What an authenticating server reads.
+    request_metadata: GrpcMetadata
+    // When this exchange's budget runs out, from the client's
+    // `grpc-timeout` and this server's ceiling, as an absolute reading.
+    // Zero means the client named none.
+    deadline_nanos: Int
+    pending: Bytes
+    actions_drained: Bool
+
+// What a turn of the server's loop taught it.
+pub enum GrpcServeEvent
+    // A call arrived on a path this server answers for.  The metadata
+    // is on the exchange; this is where authentication happens.
+    GrpcCallOpened(method: GrpcMethodDesc)
+    // One request message, deframed.
+    GrpcRequestMessage(body: Bytes)
+    // The client half-closed: no more request messages are coming.
+    GrpcRequestFinished
+    // The client reset the stream, or its deadline passed.  The
+    // handler should stop working: nobody is waiting for the answer.
+    GrpcCallAbandoned(http2_code: Int)
+    // A response message was accepted by the client's window in full.
+    GrpcResponseSent(index: Int)
+
+// One turn of the server's loop for one exchange.
+pub struct GrpcServeStep
+    exchange: GrpcExchange
+    events: [GrpcServeEvent]
+    wait_ms: Int
+
+// The default server options: the codec's default limits, no extra
+// metadata, no deadline ceiling and `identity` compression.
+//
+// ```novo
+// use grpcserve
+//
+// fn main() [io]
+//     println("${grpcserve.default_options().max_deadline_nanos}")
+// ```
+pub fn default_options() -> GrpcServerOptions []
+    todo("grpc-nv.grpcserve.default_options")
+
+// A server answering for the services in a descriptor set.
+//
+// The descriptors come from protobuf-nv — parsed from a
+// `FileDescriptorSet`, or built by the generator — so a server and the
+// stubs it answers with cannot disagree about what a method's name or
+// streaming shape is.
+//
+// ```novo ignore
+// use grpcserve
+//
+// fn made(set: PbFileSet) -> GrpcServer
+//     grpcserve.server(set, grpcserve.default_options())
+// ```
+pub fn server(set: PbFileSet, o: GrpcServerOptions) -> GrpcServer []
+    todo("grpc-nv.grpcserve.server")
+
+// The method a `:path` resolves to, or `None`.
+//
+// `None` is `UNIMPLEMENTED` and a trailers-only response, which
+// `unimplemented_response` builds.
+//
+// ```novo ignore
+// use grpcserve
+//
+// fn find(s: GrpcServer, path: Str) -> ?GrpcMethodDesc
+//     grpcserve.route(s, path)
+// ```
+pub fn route(s: GrpcServer, path: Str) -> ?GrpcMethodDesc []
+    todo("grpc-nv.grpcserve.route")
+
+// The trailers-only response an unroutable path gets.
+//
+// ONE header set, with `grpc-status: 12` in it and `end_stream` set —
+// not a response head, then a body, then trailers.  A server that sent
+// a normal head first leaves a conforming client waiting for a body
+// that never comes, and this is the function that makes writing it
+// that way the easy path.
+//
+// ```novo ignore
+// use grpcserve
+//
+// fn no(path: Str) -> Result<GrpcMetadata, GrpcCallError>
+//     grpcserve.unimplemented_response(path)
+// ```
+pub fn unimplemented_response(path: Str) -> Result<GrpcMetadata, GrpcCallError> []
+    todo("grpc-nv.grpcserve.unimplemented_response")
+
+// Mark a service as serving, or not.
+//
+// What a health check reads, and what a graceful shutdown clears
+// before it stops accepting: a load balancer that learns from the
+// health service stops sending work before the process stops
+// answering, which is the difference between a deploy and an outage.
+//
+// ```novo ignore
+// use grpcserve
+//
+// fn down(s: GrpcServer) -> GrpcServer
+//     grpcserve.set_serving(s, "helloworld.Greeter", false)
+// ```
+pub fn set_serving(s: GrpcServer, full_name: Str, serving: Bool) -> GrpcServer []
+    todo("grpc-nv.grpcserve.set_serving")
+
+// Whether a service is currently accepting calls.
+//
+// ```novo ignore
+// use grpcserve
+//
+// fn up(s: GrpcServer, name: Str) -> Bool
+//     grpcserve.is_serving(s, name)
+// ```
+pub fn is_serving(s: GrpcServer, full_name: Str) -> Bool []
+    todo("grpc-nv.grpcserve.is_serving")
+
+// Begin an exchange from the request headers that arrived on a stream.
+//
+// Performs nothing: it reads metadata and answers a value, so a test
+// asserts what a set of request headers becomes — the method, the
+// deadline after this server's ceiling is applied, the encoding —
+// without a transport.
+//
+// ```novo ignore
+// use grpcserve
+//
+// fn open(s: GrpcServer, st: GrpcStream, md: GrpcMetadata, now: Int) -> Result<GrpcExchange, GrpcCallError>
+//     grpcserve.exchange(s, st, md, now)
+// ```
+pub fn exchange(s: GrpcServer, st: GrpcStream, md: GrpcMetadata,
+                now_nanos: Int) -> Result<GrpcExchange, GrpcCallError> []
+    todo("grpc-nv.grpcserve.exchange")
+
+// One turn: perform the actions the codec is holding, read what the
+// transport has, feed it back, and answer the events.
+//
+// ```novo ignore
+// use grpcserve
+//
+// fn turn(x: GrpcExchange, t: GrpcTransport, now: Int) -> Result<GrpcServeStep, GrpcCallError>
+//     grpcserve.pump(x, t, now)
+// ```
+pub fn pump<T: GrpcTransport[e]>(x: GrpcExchange, t: T,
+                                 now_nanos: Int) -> Result<GrpcServeStep, GrpcCallError> [e]
+    todo("grpc-nv.grpcserve.pump")
+
+// Send the response head.
+//
+// Separate from the first message because a server that has decided it
+// will answer, but has not computed what, wants to say so — and
+// because a server-streaming call's head arrives long before its last
+// message.
+//
+// ```novo ignore
+// use grpcserve
+//
+// fn head(x: GrpcExchange, t: GrpcTransport, md: GrpcMetadata, now: Int) -> Result<GrpcServeStep, GrpcCallError>
+//     grpcserve.send_head(x, t, md, now)
+// ```
+pub fn send_head<T: GrpcTransport[e]>(x: GrpcExchange, t: T, md: GrpcMetadata,
+                                      now_nanos: Int) -> Result<GrpcServeStep, GrpcCallError> [e]
+    todo("grpc-nv.grpcserve.send_head")
+
+// Queue a response message.
+//
+// ```novo ignore
+// use grpcserve
+//
+// fn say(x: GrpcExchange, t: GrpcTransport, body: Bytes, now: Int) -> Result<GrpcServeStep, GrpcCallError>
+//     grpcserve.send(x, t, body, now)
+// ```
+pub fn send<T: GrpcTransport[e]>(x: GrpcExchange, t: T, body: Bytes,
+                                 now_nanos: Int) -> Result<GrpcServeStep, GrpcCallError> [e]
+    todo("grpc-nv.grpcserve.send")
+
+// End the call with a status: the trailers, and `end_stream`.
+//
+// Every gRPC response ends here, including the successful ones.  A
+// server that returned a body and stopped has sent a call that never
+// finishes, because the status is in the trailers and the client is
+// waiting for them.
+//
+// ```novo ignore
+// use grpcserve
+//
+// fn done(x: GrpcExchange, t: GrpcTransport, tr: GrpcTrailers, now: Int) -> Result<GrpcServeStep, GrpcCallError>
+//     grpcserve.finish(x, t, tr, now)
+// ```
+pub fn finish<T: GrpcTransport[e]>(x: GrpcExchange, t: T, tr: GrpcTrailers,
+                                   now_nanos: Int) -> Result<GrpcServeStep, GrpcCallError> [e]
+    todo("grpc-nv.grpcserve.finish")
+
+// The deadline this exchange is working to, as an absolute reading, or
+// zero.
+//
+// Read by a handler that is itself a client: it passes
+// `grpcchan.forwarded_deadline` of this to the next hop, never the
+// number that arrived, or a chain of proxies multiplies the budget.
+//
+// ```novo ignore
+// use grpcserve
+//
+// fn budget(x: GrpcExchange) -> Int
+//     grpcserve.deadline_of(x)
+// ```
+pub fn deadline_of(x: GrpcExchange) -> Int []
+    todo("grpc-nv.grpcserve.deadline_of")
+
+// True when this exchange's deadline has passed, so the handler should
+// stop.
+//
+// A server that kept working past a deadline is burning capacity on an
+// answer nobody will read, and under load that is the whole difference
+// between a slow server and a collapsed one.
+//
+// ```novo ignore
+// use grpcserve
+//
+// fn late(x: GrpcExchange, now: Int) -> Bool
+//     grpcserve.abandoned(x, now)
+// ```
+pub fn abandoned(x: GrpcExchange, now_nanos: Int) -> Bool []
+    todo("grpc-nv.grpcserve.abandoned")
+
+// The request metadata as it arrived.
+//
+// Before anything was applied to it, so an authenticating server sees
+// exactly what the client sent.
+//
+// ```novo ignore
+// use grpcserve
+//
+// fn who(x: GrpcExchange) -> GrpcMetadata
+//     grpcserve.request_metadata(x)
+// ```
+pub fn request_metadata(x: GrpcExchange) -> GrpcMetadata []
+    todo("grpc-nv.grpcserve.request_metadata")
+
+// The full name of the standard health service,
+// `grpc.health.v1.Health`.
+//
+// Named here rather than implemented: the service is three messages of
+// protobuf and a server that has `route` and `is_serving` has
+// everything it needs, and a health service inside this package would
+// be this package deciding what "healthy" means.
+//
+// ```novo
+// use grpcserve
+//
+// fn main() [io]
+//     println(grpcserve.health_service_name())
+// ```
+pub fn health_service_name() -> Str []
+    todo("grpc-nv.grpcserve.health_service_name")

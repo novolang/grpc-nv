@@ -1,0 +1,213 @@
+// grpcstub.nv — the contract between a generated stub and this
+// package, written down so the generator has something to target.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// WHAT A GENERATOR CANNOT BE ASKED TO DECIDE.  protobuf-nv's `pbgen`
+// turns a `.proto` file into novo-lang source: a struct per message,
+// an encode and a decode function per struct, names mangled by rules
+// it publishes.  What it must not do is invent a calling convention —
+// if the generated client called `grpcinvoke.unary` with arguments it
+// chose, then every change here would be a change to every generated
+// file, and a generated file is one nobody edits.  So the convention
+// is HERE, in four functions and one struct, and a generated stub is
+// the thinnest possible layer over them.
+//
+// THE TWO HALVES A STUB SUPPLIES ARE A NAME AND A PAIR OF FUNCTIONS.
+// The name is `grpcsvc.path_of(service, method)`, which the generator
+// already knows from the descriptor.  The pair is the encoder and the
+// decoder for this method's two message types, and they are passed as
+// NAMED FUNCTIONS rather than closures: a lambda that becomes a value
+// is refused at `@tier(embedded)`, and while this package is `host` and
+// will never see that tier, a generated file that used one would be a
+// generated file nobody could reuse in a codec at a lower layer.
+//
+// SO THE STUB CONTRACT IS: given a `GrpcMethodStub`, a channel and a
+// transport, this package conducts the call and the generated code
+// never touches `GrpcCall`, `GrpcAction` or a frame.  A reader of a
+// generated file sees one function per method whose body is one call
+// into here, and that is the whole of what the generator has to get
+// right.
+
+// One method, as a generated stub describes it.
+//
+// `encode` and `decode` are named functions in the generated module —
+// `pbgen.encode_fn_name` and `.decode_fn_name` say what they are
+// called — so a stub is a value a generated file builds once at module
+// level and this package walks.
+pub struct GrpcMethodStub
+    // The descriptor, which carries the path and the streaming shape.
+    method: GrpcMethodDesc
+    // The generated encoder for the request type: a message to the
+    // bytes that go inside the five-byte frame.
+    encode_request: GrpcEncodeFn
+    // The generated decoder for the response type.
+    decode_response: GrpcDecodeFn
+
+// A generated encoder, as this package needs it.
+//
+// `PbDynamic` and not a generic parameter, because a `GrpcMethodStub`
+// has to be a value a generated module can put in a list beside stubs
+// for other message types — and a list needs one type.  A generated
+// stub's own typed wrapper converts, which is one function call in a
+// file nobody reads.
+pub struct GrpcEncodeFn
+    // The fully-qualified protobuf name this encodes, for the schema
+    // check a mismatched stub would otherwise fail at runtime.
+    type_name: Str
+
+// A generated decoder, as this package needs it.
+pub struct GrpcDecodeFn
+    type_name: Str
+
+// One service, as a generated module describes it.
+pub struct GrpcServiceStub
+    service: GrpcServiceDesc
+    methods: [GrpcMethodStub]
+
+// The stub for a method of a service in a descriptor set.
+//
+// The descriptor is the single source: a stub built from it cannot
+// name a method the service does not have, and a `.proto` change that
+// renames a method breaks the build rather than the deployment.
+//
+// ```novo ignore
+// use grpcstub
+//
+// fn made(set: PbFileSet, svc: Str, m: Str) -> ?GrpcMethodStub
+//     grpcstub.method_stub(set, svc, m)
+// ```
+pub fn method_stub(set: PbFileSet, service_full_name: Str, method_name: Str) -> ?GrpcMethodStub []
+    todo("grpc-nv.grpcstub.method_stub")
+
+// Every method of a service, as stubs.
+//
+// ```novo ignore
+// use grpcstub
+//
+// fn made(set: PbFileSet, svc: Str) -> ?GrpcServiceStub
+//     grpcstub.service_stub(set, svc)
+// ```
+pub fn service_stub(set: PbFileSet, service_full_name: Str) -> ?GrpcServiceStub []
+    todo("grpc-nv.grpcstub.service_stub")
+
+// The `:path` a stub's method is called on.
+//
+// `/package.Service/Method`, from `grpcsvc.path_of`.  Published here
+// so a generated file has one place to get it and never builds the
+// string itself.
+//
+// ```novo ignore
+// use grpcstub
+//
+// fn where_to(s: GrpcMethodStub) -> Str
+//     grpcstub.path_of(s)
+// ```
+pub fn path_of(s: GrpcMethodStub) -> Str []
+    todo("grpc-nv.grpcstub.path_of")
+
+// The four shapes, as the stub's descriptor says.
+//
+// A generated file matches on this to decide which of the four call
+// functions to emit, rather than deriving it from two booleans and
+// getting one of the four combinations wrong.
+//
+// ```novo ignore
+// use grpcstub
+//
+// fn shape(s: GrpcMethodStub) -> PbStreaming
+//     grpcstub.streaming_of(s)
+// ```
+pub fn streaming_of(s: GrpcMethodStub) -> PbStreaming []
+    todo("grpc-nv.grpcstub.streaming_of")
+
+// An invocation for a stub's method on a channel.
+//
+// The one function a generated unary client calls before `unary`.
+// Everything the call needs — the path, the authority, the metadata,
+// the deadline — comes from the stub and the channel, and the
+// generated file supplies neither.
+//
+// ```novo ignore
+// use grpcstub
+//
+// fn start(s: GrpcMethodStub, c: GrpcChannel, now: Int) -> Result<GrpcInvocation, GrpcCallError>
+//     grpcstub.invoke(s, c, grpcmeta.empty(), 0, now)
+// ```
+pub fn invoke(s: GrpcMethodStub, c: GrpcChannel, md: GrpcMetadata, deadline_nanos: Int,
+              now_nanos: Int) -> Result<GrpcInvocation, GrpcCallError> []
+    todo("grpc-nv.grpcstub.invoke")
+
+// Check that a stub's encoder and decoder name the types its
+// descriptor says they should.
+//
+// The failure this catches is a generated file that has drifted from
+// the `.proto` it came from — regenerated for one and linked against
+// the other — which otherwise shows up as a decode failure on a field
+// number nobody recognises, at the worst possible moment.
+//
+// ```novo ignore
+// use grpcstub
+//
+// fn ok(s: GrpcMethodStub) -> Bool
+//     grpcstub.types_agree(s)
+// ```
+pub fn types_agree(s: GrpcMethodStub) -> Bool []
+    todo("grpc-nv.grpcstub.types_agree")
+
+// The name a generated module is called, for a `.proto` file.
+//
+// `pbgen.novo_module_name`'s answer, published here so a stub and the
+// messages it encodes are found in the same place by the same rule.
+//
+// ```novo
+// use grpcstub
+//
+// fn main() [io]
+//     println(grpcstub.module_name_for("helloworld.proto"))
+// ```
+pub fn module_name_for(proto_file: Str) -> Str []
+    todo("grpc-nv.grpcstub.module_name_for")
+
+// The name a generated client function takes for a method.
+//
+// A rule rather than a choice, so two generated files never disagree
+// and so a reader of one can predict the other.
+//
+// ```novo
+// use grpcstub
+//
+// fn main() [io]
+//     println(grpcstub.client_fn_name("helloworld.Greeter", "SayHello"))
+// ```
+pub fn client_fn_name(service_full_name: Str, method_name: Str) -> Str []
+    todo("grpc-nv.grpcstub.client_fn_name")
+
+// The name a generated server handler takes for a method.
+//
+// ```novo
+// use grpcstub
+//
+// fn main() [io]
+//     println(grpcstub.server_fn_name("helloworld.Greeter", "SayHello"))
+// ```
+pub fn server_fn_name(service_full_name: Str, method_name: Str) -> Str []
+    todo("grpc-nv.grpcstub.server_fn_name")
+
+// The reflection service's full name,
+// `grpc.reflection.v1.ServerReflection`.
+//
+// Named and not implemented, for the reason the health service is:
+// reflection is a bidirectional call carrying descriptor sets, and a
+// server with `grpcserve.route` and protobuf-nv's `write_file_set` has
+// everything it needs.  What this package would add is a decision
+// about which descriptors to expose, which is a deployment's.
+//
+// ```novo
+// use grpcstub
+//
+// fn main() [io]
+//     println(grpcstub.reflection_service_name())
+// ```
+pub fn reflection_service_name() -> Str []
+    todo("grpc-nv.grpcstub.reflection_service_name")

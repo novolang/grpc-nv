@@ -1,0 +1,375 @@
+// grpcchan.nv — a channel: one HTTP/2 connection's worth of policy,
+// and the clock a deadline is measured against.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// A CHANNEL IS NOT A CONNECTION, AND KEEPING THEM APART IS THE POINT.
+// grpc's own C implementation calls this a channel because it outlives
+// the connection under it: a channel survives a GOAWAY, a reconnection
+// and a change of address, and a call started on it after any of those
+// is the same call from the caller's side.  So `GrpcChannel` holds the
+// policy — the deadline, the metadata every call carries, the retry
+// rules, the message size limits — and the transport is an argument to
+// every function that performs, never a field.  A channel with a
+// socket in it could not be reconnected without being rebuilt, and
+// rebuilding it would lose the policy.
+//
+// THE DEADLINE IS WHERE THIS PACKAGE'S ONE CLOCK READING LIVES.
+// grpc-codec-nv has no clock at all — `grpcmeta.remaining` takes the
+// elapsed nanoseconds as a parameter — and something has to turn "five
+// seconds from now" into a `grpc-timeout` header and then into "has it
+// expired".  `now_nanos` is that, it is the only `[time]` row in the
+// package, and every other function takes the reading as an argument
+// so a deadline test is a table.
+//
+// AND A PROXY MUST DECREMENT THE DEADLINE.  `grpc-timeout` is a
+// duration from receipt and not an instant, which is what lets a call
+// cross a machine whose clock is wrong; forwarding one unchanged gives
+// the next hop the whole budget again, and a chain of five proxies
+// multiplies the deadline by five.  `forwarded_deadline` is that
+// subtraction, published so a proxy has one function to call rather
+// than arithmetic to get right.
+
+// How this channel reaches a server.
+pub struct GrpcEndpoint
+    // The `:authority` pseudo-header: the host and, when it is not the
+    // default, the port.  What virtual hosting and TLS verification
+    // both key off.
+    authority: Str
+    // The `:scheme`: `https` or `http`.
+    scheme: Str
+    host: Str
+    port: Int
+
+// When to try a failed call again.
+//
+// gRPC's own retry policy, from its service config, with the names it
+// uses.  It is a value here rather than JSON because a service config
+// is a deployment's decision and this package's job is to apply one,
+// not to parse one.
+pub struct GrpcRetryPolicy
+    // Including the original.  gRPC's own cap is 5; 1 turns retries
+    // off.
+    max_attempts: Int
+    initial_backoff_ms: Int
+    max_backoff_ms: Int
+    // The growth ratio as a fraction, computed in integers so the same
+    // policy produces the same millisecond on every target.
+    multiplier_num: Int
+    multiplier_den: Int
+    // The statuses worth retrying.  gRPC makes this a list rather than
+    // a predicate because it is a per-service decision:
+    // `UNAVAILABLE` always, `RESOURCE_EXHAUSTED` only where the server
+    // is known to shed load rather than to be out of quota.
+    retryable_statuses: [GrpcStatus]
+
+// Everything a channel decides once, for every call on it.
+pub struct GrpcChannelOptions
+    // The codec's framing limits, handed to every call.
+    limits: GrpcLimits
+    // Metadata every request carries: an API key, a user agent, a
+    // trace header.  Per-call metadata is merged over it.
+    default_metadata: GrpcMetadata
+    // The deadline a call gets when it names none.  Zero means none at
+    // all — which is what almost every outage postmortem blames, and
+    // is the default only because a library that imposed one would
+    // break the long-running streams gRPC exists for.
+    default_deadline_nanos: Int
+    // The compression this client offers, as a `grpc-accept-encoding`
+    // value, and the one it uses for its own messages.  The codec
+    // deliberately does neither: the flag says THAT a message is
+    // compressed and `grpc-encoding` says with what, and the bytes are
+    // the host's to inflate.
+    accept_encoding: Str
+    send_encoding: Str
+    retry: GrpcRetryPolicy
+    // How long to wait for a flow-control window to open before giving
+    // up on a send.
+    window_stall_timeout_ms: Int
+
+// One channel: an endpoint, its policy, and nothing that performs.
+pub struct GrpcChannel
+    endpoint: GrpcEndpoint
+    options: GrpcChannelOptions
+
+// The default retry policy: one attempt, so no retries.
+//
+// Off by default because a retry is a second execution, and a library
+// that retried by default would be deciding that every method its
+// callers write is idempotent.  gRPC's own default is the same and for
+// the same reason.
+//
+// ```novo
+// use grpcchan
+//
+// fn main() [io]
+//     println("${grpcchan.no_retries().max_attempts}")
+// ```
+pub fn no_retries() -> GrpcRetryPolicy []
+    todo("grpc-nv.grpcchan.no_retries")
+
+// gRPC's own suggested policy: five attempts, 100 ms doubling to one
+// second, retrying `UNAVAILABLE` and nothing else.
+//
+// `UNAVAILABLE` and nothing else is `grpcstatus.is_retryable`'s answer
+// too, and the agreement is deliberate.  `DEADLINE_EXCEEDED` is not
+// retryable because the deadline may have passed after the work
+// succeeded, so a retry does it twice; `ABORTED` is not, because the
+// retry belongs at the level that knows what the transaction was.
+//
+// ```novo
+// use grpcchan
+//
+// fn main() [io]
+//     println("${grpcchan.default_retries().max_attempts}")
+// ```
+pub fn default_retries() -> GrpcRetryPolicy []
+    todo("grpc-nv.grpcchan.default_retries")
+
+// A retry policy with the numbers spelled out.
+//
+// ```novo
+// use grpcchan
+//
+// fn main() [io]
+//     let p = grpcchan.retry_policy(3, 100, 1000, 2, 1, [])
+//     println("${p.initial_backoff_ms}")
+// ```
+pub fn retry_policy(max_attempts: Int, initial_ms: Int, max_ms: Int, mult_num: Int, mult_den: Int,
+                    statuses: [GrpcStatus]) -> GrpcRetryPolicy []
+    todo("grpc-nv.grpcchan.retry_policy")
+
+// The backoff before attempt `attempt`, counting the first retry as 1.
+//
+// No jitter drawn here: gRPC's own algorithm multiplies by a random
+// factor between 0.8 and 1.2, and the draw is the caller's for the
+// reason it is the caller's in mqtt-nv — `[rand]` would make the one
+// number nobody can see untestable, and a fleet reconnecting after a
+// server restart would need an entropy source none of it has.
+//
+// ```novo
+// use grpcchan
+//
+// fn main() [io]
+//     println("${grpcchan.backoff_ms(grpcchan.default_retries(), 2, 1000)}")
+// ```
+pub fn backoff_ms(p: GrpcRetryPolicy, attempt: Int, jitter_800_to_1200: Int) -> Int []
+    todo("grpc-nv.grpcchan.backoff_ms")
+
+// True when this status is one the policy retries.
+//
+// ```novo
+// use grpcchan
+//
+// fn main() [io]
+//     println("${grpcchan.retries_status(grpcchan.default_retries(), GrpcUnavailable)}")
+// ```
+pub fn retries_status(p: GrpcRetryPolicy, s: GrpcStatus) -> Bool []
+    todo("grpc-nv.grpcchan.retries_status")
+
+// The default channel options: the codec's default limits, no extra
+// metadata, no deadline, `identity` compression and no retries.
+//
+// ```novo
+// use grpcchan
+//
+// fn main() [io]
+//     println("${grpcchan.default_options().default_deadline_nanos}")
+// ```
+pub fn default_options() -> GrpcChannelOptions []
+    todo("grpc-nv.grpcchan.default_options")
+
+// The endpoint a `host:port` and a scheme name.
+//
+// The authority is derived rather than taken, because a `:authority`
+// that disagrees with the host a TLS certificate was verified for is
+// the mistake this exists to prevent.
+//
+// ```novo
+// use grpcchan
+//
+// fn main() [io]
+//     println(grpcchan.endpoint("https", "api.example.com", 443).authority)
+// ```
+pub fn endpoint(scheme: Str, host: Str, port: Int) -> GrpcEndpoint []
+    todo("grpc-nv.grpcchan.endpoint")
+
+// A channel over an endpoint, with the default options.
+//
+// Nothing is opened.  A channel is policy; the transport is an
+// argument to every function that performs.
+//
+// ```novo
+// use grpcchan
+//
+// fn main() [io]
+//     let c = grpcchan.channel(grpcchan.endpoint("https", "api.example.com", 443))
+//     println(c.endpoint.host)
+// ```
+pub fn channel(e: GrpcEndpoint) -> GrpcChannel []
+    todo("grpc-nv.grpcchan.channel")
+
+// The options this channel applies to every call.
+//
+// ```novo
+// use grpcchan
+//
+// fn main() [io]
+//     let c = grpcchan.channel(grpcchan.endpoint("https", "h", 443))
+//     println("${grpcchan.with_options(c, grpcchan.default_options()).endpoint.port}")
+// ```
+pub fn with_options(c: GrpcChannel, o: GrpcChannelOptions) -> GrpcChannel []
+    todo("grpc-nv.grpcchan.with_options")
+
+// Metadata every request on this channel carries.
+//
+// ```novo
+// use grpcchan
+// use grpcmeta
+//
+// fn main() [io]
+//     let c = grpcchan.channel(grpcchan.endpoint("https", "h", 443))
+//     println("${grpcchan.with_metadata(c, grpcmeta.empty()).endpoint.port}")
+// ```
+pub fn with_metadata(c: GrpcChannel, md: GrpcMetadata) -> GrpcChannel []
+    todo("grpc-nv.grpcchan.with_metadata")
+
+// The deadline a call gets when it names none, in nanoseconds.
+//
+// ```novo
+// use grpcchan
+//
+// fn main() [io]
+//     let c = grpcchan.channel(grpcchan.endpoint("https", "h", 443))
+//     println("${grpcchan.with_deadline(c, 5000000000).options.default_deadline_nanos}")
+// ```
+pub fn with_deadline(c: GrpcChannel, nanos: Int) -> GrpcChannel []
+    todo("grpc-nv.grpcchan.with_deadline")
+
+// The retry policy for this channel.
+//
+// ```novo
+// use grpcchan
+//
+// fn main() [io]
+//     let c = grpcchan.channel(grpcchan.endpoint("https", "h", 443))
+//     println("${grpcchan.with_retries(c, grpcchan.default_retries()).options.retry.max_attempts}")
+// ```
+pub fn with_retries(c: GrpcChannel, p: GrpcRetryPolicy) -> GrpcChannel []
+    todo("grpc-nv.grpcchan.with_retries")
+
+// A monotonic reading in nanoseconds.
+//
+// The one function in this package that reads a clock, and the only
+// `[time]` row in it.  Nanoseconds and not milliseconds because
+// `grpc-timeout` has a nanosecond unit and a deadline that had been
+// rounded to a millisecond on the way in cannot be forwarded
+// faithfully by a proxy.
+//
+// ```novo
+// use grpcchan
+//
+// fn main() [io, time]
+//     println("${grpcchan.now_nanos() >= 0}")
+// ```
+pub fn now_nanos() -> Int [time]
+    todo("grpc-nv.grpcchan.now_nanos")
+
+// The metadata a request carries: the channel's defaults, the call's
+// own merged over them, and the `grpc-timeout` the deadline becomes.
+//
+// One function rather than three, because the order matters and is
+// invisible: a per-call `authorization` must beat the channel's, and a
+// per-call deadline must beat the channel's, and a caller assembling
+// the three by hand gets one of them the wrong way round.
+//
+// ```novo
+// use grpcchan
+// use grpcmeta
+//
+// fn main() [io]
+//     let c = grpcchan.channel(grpcchan.endpoint("https", "h", 443))
+//     match grpcchan.request_metadata(c, grpcmeta.empty(), 0)
+//         Ok(md) => println("${grpcmeta.count(md)}")
+//         Err(_) => println("refused")
+// ```
+pub fn request_metadata(c: GrpcChannel, per_call: GrpcMetadata,
+                        deadline_nanos: Int) -> Result<GrpcMetadata, GrpcEncodeError> []
+    todo("grpc-nv.grpcchan.request_metadata")
+
+// The instant a deadline expires, given the clock reading a call
+// started at.
+//
+// An absolute instant inside the process and a duration on the wire:
+// the two spellings exist because a machine's own clock is consistent
+// with itself and two machines' clocks are not.
+//
+// ```novo
+// use grpcchan
+//
+// fn main() [io]
+//     println("${grpcchan.deadline_at(1000, 5000000000)}")
+// ```
+pub fn deadline_at(started_nanos: Int, budget_nanos: Int) -> Int []
+    todo("grpc-nv.grpcchan.deadline_at")
+
+// True when a deadline has passed at this reading.
+//
+// ```novo
+// use grpcchan
+//
+// fn main() [io]
+//     println("${grpcchan.deadline_passed(1000, 2000)}")
+// ```
+pub fn deadline_passed(deadline_nanos: Int, now_nanos: Int) -> Bool []
+    todo("grpc-nv.grpcchan.deadline_passed")
+
+// The deadline a PROXY forwards: what is left, not what arrived.
+//
+// `grpc-timeout` is a duration from receipt, so forwarding one
+// unchanged gives the next hop the whole budget again and a chain of
+// five proxies multiplies the deadline by five.  This is that
+// subtraction, published so a proxy has a function to call rather than
+// arithmetic to get right.
+//
+// ```novo
+// use grpcchan
+//
+// fn main() [io]
+//     println("${grpcchan.forwarded_deadline(5000000000, 1000000000)}")
+// ```
+pub fn forwarded_deadline(received_nanos: Int, elapsed_nanos: Int) -> Int []
+    todo("grpc-nv.grpcchan.forwarded_deadline")
+
+// Open a TLS connection to this channel's endpoint, offering `h2` in
+// ALPN.
+//
+// `[net]`, which is `std.tls`'s own row.  **It answers a handle and
+// not a `GrpcTransport`**, because nothing in this project implements
+// that trait: HTTP/2 has to be spoken over the connection this opens,
+// and `grpctrans.nv` says what is missing.  The function is here so
+// that the one piece the standard library CAN provide — a TLS session
+// that negotiated `h2` — is written down and testable the day a
+// transport exists.
+//
+// ```novo
+// use grpcchan
+//
+// fn main() [io]
+//     println(grpctrans.ALPN_H2)
+// ```
+pub fn dial_tls(c: GrpcChannel, cfg: TlsConfig) -> Result<Int, GrpcTransportFault> [net]
+    todo("grpc-nv.grpcchan.dial_tls")
+
+// A client-side TLS configuration for this channel's authority.
+//
+// ```novo
+// use grpcchan
+//
+// fn main() [io]
+//     let c = grpcchan.channel(grpcchan.endpoint("https", "api.example.com", 443))
+//     let cfg = grpcchan.tls_for(c)
+//     println(c.endpoint.authority)
+// ```
+pub fn tls_for(c: GrpcChannel) -> TlsConfig []
+    todo("grpc-nv.grpcchan.tls_for")

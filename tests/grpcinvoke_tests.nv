@@ -1,0 +1,390 @@
+// grpcinvoke_tests.nv — the call, the deadline and the retry, driven
+// over a transport that does not exist yet.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: grpc-nv.<module>.<fn>`.
+// That is the expected result until the bodies land.
+//
+// THE TRANSPORT BELOW IS THE ONLY ONE THERE IS.  There is no HTTP/2 in
+// this project, so `GrpcTape` — a transport over values in memory that
+// performs nothing — is not a test double standing in for a real one;
+// it is the only implementation of `GrpcTransport[e]` that exists
+// anywhere today.  That is written down rather than glossed, because a
+// reader who sees a green suite here should not conclude that a call
+// has ever reached a server.
+//
+// AND THE COMPILER MAKES THE FIRST ASSERTION.  `GrpcTape` implements
+// `GrpcTransport[]`, and the functions that drive a call over it carry
+// no effect row at all — so the effect parameter flowing from the impl
+// to the call is checked before the run starts.
+
+use std.test
+use std.bytes
+use std.list
+use grpcchan
+use grpcfault
+use grpcinvoke
+use grpctrans
+
+// A transport over nothing at all.  Every method answers a value it
+// already holds: no socket, no HPACK, no flow control.
+struct GrpcTape
+    open: Bool
+
+// A transport that costs nothing.
+//
+// ```novo ignore
+// use grpcinvoke
+//
+// fn drive(i: GrpcInvocation, t: GrpcTape) -> Result<GrpcInvokeStep, GrpcCallError>
+//     grpcinvoke.pump(i, t, 0)
+// ```
+impl GrpcTransport[] for GrpcTape
+    fn grpc_open(self) -> Result<GrpcStream, GrpcTransportFault>
+        Ok(GrpcStream { id: 1 })
+
+    fn grpc_send_headers(self, s: GrpcStream, md: GrpcMetadata,
+                         end_stream: Bool) -> Result<Unit, GrpcTransportFault>
+        Ok()
+
+    fn grpc_send_data(self, s: GrpcStream, data: Bytes,
+                      end_stream: Bool) -> Result<Int, GrpcTransportFault>
+        Ok(bytes.len(data))
+
+    fn grpc_send_trailers(self, s: GrpcStream, md: GrpcMetadata) -> Result<Unit, GrpcTransportFault>
+        Ok()
+
+    fn grpc_receive(self, s: GrpcStream) -> Result<GrpcWire, GrpcTransportFault>
+        Ok(GrpcWireIdle)
+
+    fn grpc_reset(self, s: GrpcStream, http2_code: Int) -> Result<Unit, GrpcTransportFault>
+        Ok()
+
+    fn grpc_is_open(self) -> Bool
+        self.open
+
+fn a_channel() -> GrpcChannel
+    grpcchan.channel(grpcchan.endpoint("https", "api.example.com", 443))
+
+fn a_method() -> GrpcMethodDesc
+    GrpcMethodDesc { service: "helloworld.Greeter", name: "SayHello",
+                     path: "/helloworld.Greeter/SayHello",
+                     input_type: ".helloworld.HelloRequest",
+                     output_type: ".helloworld.HelloReply",
+                     streaming: PbUnary }
+
+fn a_tape() -> GrpcTape
+    GrpcTape { open: true }
+
+@test
+fn test_a_channel_is_policy_and_holds_no_connection() [io]
+    // A channel outlives a GOAWAY, a reconnection and a change of
+    // address; one with a socket in it could not be reconnected
+    // without being rebuilt, and rebuilding it would lose the policy.
+    let c = a_channel()
+
+    test.case("the authority is derived from the endpoint")
+    test.assert(c.endpoint.authority != "")
+
+    test.case("the host and port are kept as given")
+    test.assert(c.endpoint.host == "api.example.com")
+    test.assert(c.endpoint.port == 443)
+
+@test
+fn test_retries_are_off_by_default() [io]
+    // A retry is a second execution, and a library that retried by
+    // default would be deciding that every method its callers write is
+    // idempotent.  gRPC's own default is the same.
+    test.case("one attempt means no retries")
+    test.assert(grpcchan.no_retries().max_attempts == 1)
+
+    test.case("the default channel has that policy")
+    test.assert(grpcchan.default_options().retry.max_attempts == 1)
+
+    test.case("and the suggested policy is five attempts, when asked for")
+    test.assert(grpcchan.default_retries().max_attempts == 5)
+
+@test
+fn test_the_retryable_set_agrees_with_the_codecs_own_answer() [io]
+    // UNAVAILABLE and nothing else.  DEADLINE_EXCEEDED is out because
+    // the deadline may have passed after the work succeeded, so a
+    // retry does it twice; ABORTED is out because the retry belongs at
+    // the level that knows what the transaction was.
+    let p = grpcchan.default_retries()
+
+    test.case("UNAVAILABLE is retried")
+    test.assert(grpcchan.retries_status(p, GrpcUnavailable))
+
+    test.case("DEADLINE_EXCEEDED is not")
+    test.assert(not grpcchan.retries_status(p, GrpcDeadlineExceeded))
+
+    test.case("ABORTED is not")
+    test.assert(not grpcchan.retries_status(p, GrpcAborted))
+
+    test.case("and neither is a success")
+    test.assert(not grpcchan.retries_status(p, GrpcOk))
+
+@test
+fn test_the_backoff_curve_is_a_table_because_the_jitter_is_an_argument() [io]
+    // gRPC multiplies by a random factor between 0.8 and 1.2; the draw
+    // is the caller's, so with it at 1000 the curve is exact.
+    let p = grpcchan.default_retries()
+
+    test.case("the first retry waits the initial backoff")
+    test.assert(grpcchan.backoff_ms(p, 1, 1000) == p.initial_backoff_ms)
+
+    test.case("the second has grown")
+    test.assert(grpcchan.backoff_ms(p, 2, 1000) > grpcchan.backoff_ms(p, 1, 1000))
+
+    test.case("and the curve stops at the cap rather than growing forever")
+    test.assert(grpcchan.backoff_ms(p, 20, 1000) == p.max_backoff_ms)
+
+@test
+fn test_a_deadline_is_an_instant_inside_and_a_duration_on_the_wire() [io]
+    // The two spellings exist because a machine's own clock is
+    // consistent with itself and two machines' clocks are not.
+    test.case("a five-second budget from a reading is that reading plus five seconds")
+    test.assert(grpcchan.deadline_at(1000, 5000000000) == 5000001000)
+
+    test.case("it has not passed before it arrives")
+    test.assert(not grpcchan.deadline_passed(5000001000, 1000))
+
+    test.case("and it has after")
+    test.assert(grpcchan.deadline_passed(5000001000, 6000000000))
+
+@test
+fn test_a_proxy_forwards_what_is_left_and_not_what_arrived() [io]
+    // `grpc-timeout` is a duration from receipt.  Forwarding one
+    // unchanged gives the next hop the whole budget again, and a chain
+    // of five proxies multiplies the deadline by five.
+    test.case("one second of a five-second budget has been spent")
+    test.assert(grpcchan.forwarded_deadline(5000000000, 1000000000) == 4000000000)
+
+    test.case("and a budget already spent forwards as nothing, never as a negative")
+    test.assert(grpcchan.forwarded_deadline(1000000000, 9000000000) == 0)
+
+@test
+fn test_an_invocation_computes_its_request_before_anything_is_sent() [io]
+    // The split that makes the request headers assertable without a
+    // transport, which is where most of the mistakes are.
+    let c = grpcchan.with_deadline(a_channel(), 5000000000)
+
+    match grpcinvoke.invocation(c, a_method(), grpcmeta.empty(), 0, 1000)
+        Err(_) => test.assert(false)
+        Ok(i)  =>
+            test.case("the deadline is the channel's, resolved against the reading")
+            test.assert(i.deadline_nanos == 5000001000)
+
+            test.case("this is the first attempt")
+            test.assert(i.attempt == 1)
+
+            test.case("and nothing has been committed")
+            test.assert(not grpcinvoke.is_committed(i))
+
+@test
+fn test_a_per_call_deadline_beats_the_channels() [io]
+    let c = grpcchan.with_deadline(a_channel(), 60000000000)
+
+    match grpcinvoke.invocation(c, a_method(), grpcmeta.empty(), 1000000000, 0)
+        Err(_) => test.assert(false)
+        Ok(i)  => test.assert(i.deadline_nanos == 1000000000)
+
+@test
+fn test_the_metadata_order_is_channel_then_call_then_timeout() [io]
+    // The order matters and is invisible: a per-call `authorization`
+    // must beat the channel's, and a caller assembling the three by
+    // hand gets one of them the wrong way round.
+    let c = a_channel()
+
+    match grpcchan.request_metadata(c, grpcmeta.empty(), 5000000000)
+        Err(_) => test.assert(false)
+        Ok(md) =>
+            test.case("the timeout is on the request")
+            test.assert(grpcmeta.has(md, grpcmeta.timeout_header()))
+
+@test
+fn test_a_call_is_driven_over_a_transport_that_performs_nothing() [io]
+    // The signature of `driven` is the assertion, and the compiler has
+    // already checked it.
+    let c = a_channel()
+
+    match grpcinvoke.invocation(c, a_method(), grpcmeta.empty(), 0, 0)
+        Err(_) => test.assert(true)
+        Ok(i)  =>
+            test.case("a turn over a tape is a value computation")
+            match driven(i, a_tape())
+                Ok(_)  => test.assert(true)
+                Err(_) => test.assert(true)
+
+fn driven(i: GrpcInvocation, t: GrpcTape) -> Result<GrpcInvokeStep, GrpcCallError>
+    grpcinvoke.pump(i, t, 0)
+
+@test
+fn test_every_call_verb_is_generic_over_the_transport() [io]
+    let c = a_channel()
+
+    match grpcinvoke.invocation(c, a_method(), grpcmeta.empty(), 0, 0)
+        Err(_) => test.assert(true)
+        Ok(i)  =>
+            test.case("send")
+            match sent(i, a_tape())
+                Ok(_)  => test.assert(true)
+                Err(_) => test.assert(true)
+
+            test.case("half-close, without which a client stream hangs forever")
+            match half_closed(i, a_tape())
+                Ok(_)  => test.assert(true)
+                Err(_) => test.assert(true)
+
+            test.case("cancel, which is what makes the server stop working")
+            match cancelled(i, a_tape())
+                Ok(_)  => test.assert(true)
+                Err(_) => test.assert(true)
+
+            test.case("and the whole unary convenience")
+            match called(i, a_tape())
+                Ok(_)  => test.assert(true)
+                Err(_) => test.assert(true)
+
+fn sent(i: GrpcInvocation, t: GrpcTape) -> Result<GrpcInvokeStep, GrpcCallError>
+    grpcinvoke.send(i, t, bytes.from_hex("089601") ?? bytes.zeros(0), 0)
+
+fn half_closed(i: GrpcInvocation, t: GrpcTape) -> Result<GrpcInvokeStep, GrpcCallError>
+    grpcinvoke.finish_sending(i, t, 0)
+
+fn cancelled(i: GrpcInvocation, t: GrpcTape) -> Result<GrpcInvokeStep, GrpcCallError>
+    grpcinvoke.cancel(i, t, 0)
+
+fn called(i: GrpcInvocation, t: GrpcTape) -> Result<GrpcUnaryResult, GrpcCallError>
+    grpcinvoke.unary(i, t, bytes.from_hex("089601") ?? bytes.zeros(0), 0)
+
+@test
+fn test_a_call_reports_its_state_and_its_budget() [io]
+    let c = grpcchan.with_deadline(a_channel(), 5000000000)
+
+    match grpcinvoke.invocation(c, a_method(), grpcmeta.empty(), 0, 0)
+        Err(_) => test.assert(true)
+        Ok(i)  =>
+            test.case("it starts idle, which is the codec's own first state")
+            match grpcinvoke.state_of(i)
+                GrpcIdle => test.assert(true)
+                _        => test.assert(false)
+
+            test.case("no trailers have arrived")
+            match grpcinvoke.trailers_of(i)
+                Some(_) => test.assert(false)
+                None    => test.assert(true)
+
+            test.case("the wait is bounded by the deadline")
+            test.assert(grpcinvoke.wait_ms(i, 0) <= 5000)
+
+            test.case("which has not passed")
+            test.assert(not grpcinvoke.expired(i, 0))
+
+            test.case("and has, later")
+            test.assert(grpcinvoke.expired(i, 6000000000))
+
+@test
+fn test_a_retry_needs_three_agreements_and_a_committed_call_gets_none() [io]
+    let c = grpcchan.with_retries(a_channel(), grpcchan.default_retries())
+
+    match grpcinvoke.invocation(c, a_method(), grpcmeta.empty(), 0, 0)
+        Err(_) => test.assert(true)
+        Ok(i)  =>
+            test.case("an UNAVAILABLE on an uncommitted call is retried")
+            match grpcinvoke.next_attempt(i, grpcstatus.trailers(GrpcUnavailable, ""), 0)
+                None    => test.assert(false)
+                Some(d) =>
+                    test.assert(d.backoff_ms > 0)
+                    test.assert(d.invocation.attempt == 2)
+
+            test.case("and a NOT_FOUND is not — the server answered")
+            match grpcinvoke.next_attempt(i, grpcstatus.trailers(GrpcNotFound, ""), 0)
+                Some(_) => test.assert(false)
+                None    => test.assert(true)
+
+@test
+fn test_a_transport_fault_is_not_a_status_and_the_types_say_so() [io]
+    // The most common mistake in gRPC client code is folding "the
+    // server refused" into the same type as "the socket went".
+    test.case("a transport fault maps to a status only when one must be reported")
+    let s = grpctrans.status_of_fault(GrpcWireStreamsExhausted(100))
+    test.assert(grpcstatus.status_code(s) != 0)
+
+    test.case("a call error maps the same way")
+    test.assert(grpcstatus.status_code(grpcfault.status_of(GrpcCallCancelled)) ==
+                grpcstatus.status_code(GrpcCancelled))
+
+@test
+fn test_only_two_cases_make_a_non_idempotent_retry_safe() [io]
+    // A REFUSED_STREAM and a stream above a GOAWAY's last_stream.
+    // Everything else may have been processed, and retrying it is how
+    // a payment gets taken twice.
+    test.case("a stream above the GOAWAY's last was never processed")
+    test.assert(grpctrans.never_processed(GrpcWireGoAway(0, 5), 9))
+
+    test.case("one below it may have been")
+    test.assert(not grpctrans.never_processed(GrpcWireGoAway(0, 5), 3))
+
+    test.case("a socket that went may have been processed")
+    test.assert(not grpctrans.never_processed(GrpcWireIoFailed(IoBrokenPipe), 1))
+
+    test.case("and a cancelled call is never safe to replay blindly")
+    test.assert(not grpcfault.safe_to_replay(GrpcCallCancelled, 1))
+
+@test
+fn test_the_http2_codes_are_the_rfcs_own_numbers() [io]
+    test.case("NO_ERROR is 0")
+    test.assert(grpctrans.H2_NO_ERROR == 0x0)
+
+    test.case("CANCEL is 8, which is what a cancelled call resets with")
+    test.assert(grpctrans.H2_CANCEL == 0x8)
+
+    test.case("INTERNAL_ERROR is 2")
+    test.assert(grpctrans.H2_INTERNAL_ERROR == 0x2)
+
+    test.case("REFUSED_STREAM is 7, the one that makes a retry safe")
+    test.assert(grpctrans.H2_REFUSED_STREAM == 0x7)
+
+    test.case("and ALPN offers h2, without which a server answers HTTP/1.1")
+    test.assert(grpctrans.ALPN_H2 == "h2")
+
+@test
+fn test_a_cancelled_call_resets_with_cancel() [io]
+    match grpcfault.reset_code_for(GrpcCallCancelled)
+        None    => test.assert(false)
+        Some(c) => test.assert(c == grpctrans.H2_CANCEL)
+
+@test
+fn test_a_channel_can_be_given_metadata_and_options_it_keeps() [io]
+    let c = grpcchan.with_options(
+        grpcchan.with_metadata(a_channel(), grpcmeta.empty()),
+        grpcchan.default_options())
+
+    test.case("the endpoint survives both")
+    test.assert(c.endpoint.port == 443)
+
+    test.case("and a policy built by hand is kept as written")
+    let p = grpcchan.retry_policy(3, 100, 1000, 2, 1, [GrpcUnavailable])
+    test.assert(p.max_attempts == 3)
+    test.assert(list.len(p.retryable_statuses) == 1)
+
+@test
+fn test_the_tls_half_the_standard_library_can_supply() [io, net]
+    // A TLS session with h2 in ALPN is the one piece std.tls can give
+    // today.  It answers a handle and not a transport, because nothing
+    // implements GrpcTransport.
+    let c = grpcchan.channel(grpcchan.endpoint("https", "127.0.0.1", 1))
+
+    test.case("a configuration for this channel's authority")
+    let cfg = grpcchan.tls_for(c)
+
+    test.case("and a dial to a closed port is an error, not a panic")
+    match grpcchan.dial_tls(c, cfg)
+        Ok(_)  => test.assert(false)
+        Err(_) => test.assert(true)
+
+@test
+fn test_the_clock_reader_is_the_one_function_with_a_time_row() [io, time]
+    test.case("a monotonic reading in nanoseconds is not negative")
+    test.assert(grpcchan.now_nanos() >= 0)

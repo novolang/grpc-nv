@@ -1,0 +1,121 @@
+// grpcfault.nv — the one error type a caller of this package catches,
+// and the rule that it is never a status.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// A STATUS IS NOT AN ERROR HERE, AND THAT IS THE POINT.
+// `GrpcNotFound` is a call that worked: the stream opened, the frames
+// parsed, the trailers arrived, and the server said no.  It comes back
+// as `GrpcTrailers` inside an `Ok`, and a caller that wants to branch
+// on it matches `GrpcStatus`.  `GrpcCallError` is only the cases where
+// the conversation itself failed, and keeping the two apart is what
+// makes `grpcstatus.is_retryable` and `grpctrans.never_processed`
+// answerable at all.
+//
+// grpc-codec-nv's README says this in one line — "a status is not a
+// transport fault, and the two are different types" — and this module
+// is that line held to one layer up, where it is easier to break: a
+// host has a socket to blame, and the temptation is to fold "the
+// server refused" into the same enum as "the socket went".
+
+// Why a call could not be conducted.
+//
+// Never a status the server returned: that is `GrpcTrailers`, and it
+// arrives in an `Ok`.
+pub enum GrpcCallError
+    // The transport failed.  `grpctrans.status_of_fault` says what
+    // status to report if one must be reported, and
+    // `grpctrans.never_processed` says whether a retry is safe.
+    GrpcWireFailed(cause: GrpcTransportFault)
+    // The bytes that arrived were not gRPC.
+    GrpcCodecRefusedIncoming(cause: GrpcDecodeError)
+    // This client asked the codec for something it cannot build — a
+    // reserved metadata name, a message past the limit, a call in the
+    // wrong state.
+    GrpcCodecRefusedOutgoing(cause: GrpcEncodeError)
+    // The deadline passed with the call still open.  Reported rather
+    // than turned into `GrpcDeadlineExceeded` trailers, because no
+    // trailers arrived: the server may still be working, and a caller
+    // that logged a status the server never sent is a caller
+    // debugging the wrong machine.
+    GrpcDeadlinePassed(overrun_nanos: Int)
+    // The caller cancelled.
+    GrpcCallCancelled
+    // The retry policy ran out of attempts, carrying the status of the
+    // last one so a caller can report what kept happening.
+    GrpcRetriesExhausted(attempts: Int, last: GrpcStatus)
+    // A call was started on a path no service on this server has.  The
+    // server side of `grpcsvc.parse_path` answering `None`.
+    GrpcNoSuchMethod(path: Str)
+    // A message arrived compressed with an encoding this program did
+    // not offer in `grpc-accept-encoding`.  The codec's flag says THAT
+    // a message is compressed and `grpc-encoding` says with what; the
+    // bytes are the host's to inflate, and this is the host saying it
+    // cannot.
+    GrpcEncodingNotSupported(encoding: Str)
+
+// The one-line reading, for a log or a person.
+//
+// ```novo
+// use grpcfault
+//
+// fn main() [io]
+//     let e: GrpcCallError = GrpcCallCancelled
+//     println(e.message())
+// ```
+impl Error for GrpcCallError
+    fn message(self) -> Str
+        todo("grpc-nv.grpcfault.message")
+
+// The status to report for a fault, for a caller — a proxy, a
+// gateway — that must answer with one whatever happened.
+//
+// The mapping is deliberate and each row is a decision.  A transport
+// failure becomes what `grpctrans.status_of_fault` says.  A decode
+// fault becomes what `grpcstatus.status_of_decode_error` says, which
+// is `GrpcInternal` for a malformed frame.  A passed deadline becomes
+// `GrpcDeadlineExceeded`, which is the one place in this package where
+// a status is manufactured rather than received — and it is
+// manufactured for a proxy's benefit, never reported to a caller as
+// though the server had sent it.
+//
+// ```novo
+// use grpcfault
+//
+// fn main() [io]
+//     println(grpcstatus.status_name(grpcfault.status_of(GrpcCallCancelled)))
+// ```
+pub fn status_of(e: GrpcCallError) -> GrpcStatus []
+    todo("grpc-nv.grpcfault.status_of")
+
+// True when this fault means the request was never processed, so
+// sending it again cannot do the work twice.
+//
+// The question that decides whether a NON-idempotent method may be
+// retried, and it is a narrow yes: a REFUSED_STREAM and a stream above
+// a GOAWAY's `last_stream`, and nothing else.  A reset mid-call, a
+// socket that went, a deadline that passed — all of those may have
+// been processed, and retrying them is how a payment is taken twice.
+//
+// ```novo
+// use grpcfault
+//
+// fn main() [io]
+//     println("${grpcfault.safe_to_replay(GrpcCallCancelled, 1)}")
+// ```
+pub fn safe_to_replay(e: GrpcCallError, stream_id: Int) -> Bool []
+    todo("grpc-nv.grpcfault.safe_to_replay")
+
+// The HTTP/2 error code a stream carrying this fault would be reset
+// with, or `None` where the stream is already gone.
+//
+// ```novo
+// use grpcfault
+//
+// fn main() [io]
+//     match grpcfault.reset_code_for(GrpcCallCancelled)
+//         Some(c) => println("${c}")
+//         None    => println("nothing to reset")
+// ```
+pub fn reset_code_for(e: GrpcCallError) -> ?Int []
+    todo("grpc-nv.grpcfault.reset_code_for")

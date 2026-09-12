@@ -1,0 +1,298 @@
+// grpcinvoke.nv — the four call shapes, as values a host pumps.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// ONE TYPE FOR FOUR SHAPES, AND THE STATE MACHINE ENFORCES WHICH.
+// Unary, server-streaming, client-streaming and bidirectional are
+// protobuf's two booleans with names on, and the difference between
+// them is entirely a message count: `grpcsvc.request_count` and
+// `.response_count` answer 1 or -1, and grpc-codec-nv's `GrpcCall`
+// refuses a second `send_message` on a unary call.  So four types here
+// would be four wrappers over one state machine, each of which could
+// drift from it.  There is one `GrpcInvocation`, and `grpcsvc`'s
+// descriptor is what says what it may do.
+//
+// WHAT `pump` DOES WITH grpc-codec-nv's ACTIONS.  The codec answers a
+// `GrpcCallStep` holding the events the caller learned and the
+// `GrpcAction`s the host must perform, and nothing in it writes a
+// byte.  This module is the party that walks that list — a
+// `GrpcSendHeaders` becomes `grpc_send_headers`, a `GrpcSendData`
+// becomes `grpc_send_data` and a partial write becomes the rest of the
+// same action next turn, a `GrpcSendReset` becomes `grpc_reset`.  The
+// codec's README says a host that walks the list in order has
+// implemented gRPC; this is that host.
+//
+// FLOW CONTROL IS WHERE THE ACTION LIST STOPS BEING A LIST.
+// `grpc_send_data` answers how many bytes the peer's window took, so
+// one `GrpcSendData` can span several turns.  `GrpcInvocation.pending`
+// is what is left of one, and a caller that saw `wait_ms` come back
+// non-zero with a pending action is a caller being pushed back on —
+// which is the thing a client-streaming call needs and that HTTP/1.1
+// has no way to express.
+//
+// A STATUS IS NOT A TRANSPORT FAULT, and they are different types here
+// exactly as they are in the codec.  `NOT_FOUND` is a call that worked:
+// the frames parsed, the trailers arrived, the server answered.
+// `GrpcTransportFault` is the cases where none of that happened.  A
+// function returning one type for both is what makes a caller retry a
+// business-logic refusal.
+
+// One call in flight.
+pub struct GrpcInvocation
+    // The codec's state machine — the whole protocol, and nothing in
+    // this struct duplicates it.
+    call: GrpcCall
+    // The stream it is on, once opened.
+    stream: GrpcStream
+    // The channel's policy.
+    channel: GrpcChannel
+    // When this call's budget runs out, as an absolute reading from
+    // `grpcchan.now_nanos`.  Zero means no deadline.
+    deadline_nanos: Int
+    // Which attempt this is, counting the first as 1.
+    attempt: Int
+    // Bytes of the current `GrpcSendData` the peer's window has not
+    // taken yet.  Empty when nothing is pending.
+    pending: Bytes
+    // Whether the last action of the current step was performed.
+    actions_drained: Bool
+
+// What a turn of the caller's loop taught it.
+pub enum GrpcInvokeEvent
+    // The response head arrived.  Not present on a trailers-only
+    // response, which is the case a client that assumed a HEADERS
+    // frame is the response head waits forever on.
+    GrpcResponseHead(md: GrpcMetadata)
+    // One response message, deframed.  Fires once for a unary call and
+    // any number of times for a server-streaming one.
+    GrpcResponseMessage(body: Bytes)
+    // A request message was accepted by the peer's window in full.
+    GrpcRequestSent(index: Int)
+    // The call ended, with the status the server put in its trailers.
+    // A status here is a SUCCESS of the transport: the answer arrived.
+    GrpcCallFinished(trailers: GrpcTrailers)
+    // The peer's window is closed and a send is waiting on it.
+    GrpcWindowClosed(pending_len: Int)
+
+// One turn of the caller's loop.
+pub struct GrpcInvokeStep
+    invocation: GrpcInvocation
+    events: [GrpcInvokeEvent]
+    // How long the caller may wait before pumping again, in
+    // milliseconds.  Bounded by the deadline; zero means come back
+    // immediately, because there is more to drain or more to send.
+    wait_ms: Int
+
+// Start a call on a channel.
+//
+// Nothing is sent: the `:path`, the `:authority`, the metadata and the
+// `grpc-timeout` are all computed and the codec is asked for the
+// actions, and the first `pump` performs them.  That split is what
+// lets a test assert the request headers a call produces without a
+// transport, which is where most of the mistakes are.
+//
+// ```novo ignore
+// use grpcinvoke
+//
+// fn start(c: GrpcChannel, m: GrpcMethodDesc, now: Int) -> Result<GrpcInvocation, GrpcCallError>
+//     grpcinvoke.invocation(c, m, grpcmeta.empty(), 0, now)
+// ```
+pub fn invocation(c: GrpcChannel, m: GrpcMethodDesc, md: GrpcMetadata, deadline_nanos: Int,
+                  now_nanos: Int) -> Result<GrpcInvocation, GrpcCallError> []
+    todo("grpc-nv.grpcinvoke.invocation")
+
+// One turn: perform the actions the codec is holding, read what the
+// transport has, feed it back, and answer the events.
+//
+// Effect-polymorphic: it costs whatever the transport costs.  Nothing
+// in this project supplies one — `grpctrans.nv` says why — so today
+// this function is exercised only against a transport a test writes.
+//
+// ```novo ignore
+// use grpcinvoke
+//
+// fn turn(i: GrpcInvocation, t: GrpcTransport, now: Int) -> Result<GrpcInvokeStep, GrpcCallError>
+//     grpcinvoke.pump(i, t, now)
+// ```
+pub fn pump<T: GrpcTransport[e]>(i: GrpcInvocation, t: T,
+                                 now_nanos: Int) -> Result<GrpcInvokeStep, GrpcCallError> [e]
+    todo("grpc-nv.grpcinvoke.pump")
+
+// Queue a request message.
+//
+// The body is already-serialised protobuf: this package does not know
+// what a message means and `grpcstub` is where the generated encoder
+// is called.  The five-byte length prefix is the codec's
+// `grpcframe.frame`, not this function's.
+//
+// A unary or server-streaming call refuses a second one, and the
+// refusal is grpc-codec-nv's `GrpcWrongState` rather than a rule this
+// module keeps.
+//
+// ```novo ignore
+// use grpcinvoke
+//
+// fn say(i: GrpcInvocation, t: GrpcTransport, body: Bytes, now: Int) -> Result<GrpcInvokeStep, GrpcCallError>
+//     grpcinvoke.send(i, t, body, now)
+// ```
+pub fn send<T: GrpcTransport[e]>(i: GrpcInvocation, t: T, body: Bytes,
+                                 now_nanos: Int) -> Result<GrpcInvokeStep, GrpcCallError> [e]
+    todo("grpc-nv.grpcinvoke.send")
+
+// Say there are no more request messages.
+//
+// The half-close, which is what a server-streaming call does
+// immediately after its one message and what a client-streaming call
+// does when its stream ends.  A call that never half-closes is a call
+// the server waits on forever, and it is the most common way a
+// client-streaming call hangs.
+//
+// ```novo ignore
+// use grpcinvoke
+//
+// fn done(i: GrpcInvocation, t: GrpcTransport, now: Int) -> Result<GrpcInvokeStep, GrpcCallError>
+//     grpcinvoke.finish_sending(i, t, now)
+// ```
+pub fn finish_sending<T: GrpcTransport[e]>(i: GrpcInvocation, t: T,
+                                           now_nanos: Int) -> Result<GrpcInvokeStep, GrpcCallError> [e]
+    todo("grpc-nv.grpcinvoke.finish_sending")
+
+// Cancel the call: RST_STREAM with CANCEL, and the status becomes
+// `GrpcCancelled`.
+//
+// What a caller does when the answer stopped mattering, and what an
+// expired deadline does on its own.  The reset is what makes the
+// server stop working on something nobody is waiting for, which is the
+// whole reason cancellation is in the protocol rather than being a
+// client-side `if`.
+//
+// ```novo ignore
+// use grpcinvoke
+//
+// fn stop(i: GrpcInvocation, t: GrpcTransport, now: Int) -> Result<GrpcInvokeStep, GrpcCallError>
+//     grpcinvoke.cancel(i, t, now)
+// ```
+pub fn cancel<T: GrpcTransport[e]>(i: GrpcInvocation, t: T,
+                                   now_nanos: Int) -> Result<GrpcInvokeStep, GrpcCallError> [e]
+    todo("grpc-nv.grpcinvoke.cancel")
+
+// The whole of a unary call: send one message, half-close, pump until
+// the trailers arrive, answer the one response and the status.
+//
+// The convenience that covers most calls, written once here so that
+// every caller does not write the same loop.  It is a loop over
+// `pump`, and a caller that needs to do something between turns uses
+// `pump` directly.
+//
+// ```novo ignore
+// use grpcinvoke
+//
+// fn call(i: GrpcInvocation, t: GrpcTransport, body: Bytes, now: Int) -> Result<GrpcUnaryResult, GrpcCallError>
+//     grpcinvoke.unary(i, t, body, now)
+// ```
+pub fn unary<T: GrpcTransport[e]>(i: GrpcInvocation, t: T, body: Bytes,
+                                  now_nanos: Int) -> Result<GrpcUnaryResult, GrpcCallError> [e]
+    todo("grpc-nv.grpcinvoke.unary")
+
+// A finished unary call: the response head, the one message and the
+// status.
+//
+// The message is `?Bytes` and not `Bytes` because a call that ended
+// with a non-OK status has no response body at all, and a trailers-only
+// response has neither head nor body — so the shape has to admit
+// "status, and nothing else".
+pub struct GrpcUnaryResult
+    head: GrpcMetadata
+    message: ?Bytes
+    trailers: GrpcTrailers
+
+// Where the call is, from the codec.
+//
+// ```novo ignore
+// use grpcinvoke
+//
+// fn where_is(i: GrpcInvocation) -> GrpcCallState
+//     grpcinvoke.state_of(i)
+// ```
+pub fn state_of(i: GrpcInvocation) -> GrpcCallState []
+    todo("grpc-nv.grpcinvoke.state_of")
+
+// The trailers, once the call has ended.
+//
+// ```novo ignore
+// use grpcinvoke
+//
+// fn status(i: GrpcInvocation) -> ?GrpcTrailers
+//     grpcinvoke.trailers_of(i)
+// ```
+pub fn trailers_of(i: GrpcInvocation) -> ?GrpcTrailers []
+    todo("grpc-nv.grpcinvoke.trailers_of")
+
+// How long the caller may wait before pumping again.
+//
+// Never longer than the deadline has left, which is what makes a
+// deadline fire on a call that is waiting rather than only on one that
+// is being pumped.
+//
+// ```novo ignore
+// use grpcinvoke
+//
+// fn budget(i: GrpcInvocation, now: Int) -> Int
+//     grpcinvoke.wait_ms(i, now)
+// ```
+pub fn wait_ms(i: GrpcInvocation, now_nanos: Int) -> Int []
+    todo("grpc-nv.grpcinvoke.wait_ms")
+
+// True when this call's deadline has passed.
+//
+// ```novo ignore
+// use grpcinvoke
+//
+// fn late(i: GrpcInvocation, now: Int) -> Bool
+//     grpcinvoke.expired(i, now)
+// ```
+pub fn expired(i: GrpcInvocation, now_nanos: Int) -> Bool []
+    todo("grpc-nv.grpcinvoke.expired")
+
+// The invocation to use for the next attempt, or `None` when the
+// policy says stop.
+//
+// Three things have to agree for a retry to be safe, and one function
+// is where they are made to: the channel's policy must retry this
+// status, the attempt budget must have room, and the call must not
+// have been committed — which in gRPC means no response message has
+// been received yet, because a retry after one would deliver a stream
+// twice.  A caller that checked only the status retries a
+// half-consumed server stream from the beginning.
+//
+// ```novo ignore
+// use grpcinvoke
+//
+// fn again(i: GrpcInvocation, t: GrpcTrailers, now: Int) -> ?GrpcRetryDecision
+//     grpcinvoke.next_attempt(i, t, now)
+// ```
+pub fn next_attempt(i: GrpcInvocation, t: GrpcTrailers, now_nanos: Int) -> ?GrpcRetryDecision []
+    todo("grpc-nv.grpcinvoke.next_attempt")
+
+// A retry that the policy allows: the fresh invocation, and how long
+// to wait before starting it.
+pub struct GrpcRetryDecision
+    invocation: GrpcInvocation
+    backoff_ms: Int
+
+// True when this call may no longer be retried because a response
+// message has already been delivered.
+//
+// gRPC calls this commitment.  A unary call commits when its one
+// response arrives, a server-streaming call commits on its first, and
+// after that a retry would deliver messages the caller has already
+// seen.
+//
+// ```novo ignore
+// use grpcinvoke
+//
+// fn stuck(i: GrpcInvocation) -> Bool
+//     grpcinvoke.is_committed(i)
+// ```
+pub fn is_committed(i: GrpcInvocation) -> Bool []
+    todo("grpc-nv.grpcinvoke.is_committed")

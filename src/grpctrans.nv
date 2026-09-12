@@ -1,0 +1,210 @@
+// grpctrans.nv — the HTTP/2 transport this package needs, as a trait,
+// and the plain statement that nothing implements it today.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// READ THIS FIRST.  **There is no HTTP/2 implementation in this
+// project.**  Not in the standard library — `std.http`'s client and
+// server are HTTP/1.1 — not on the package grid, and not behind an
+// FFI binding anybody has written.  So grpc-nv connects to nothing
+// today, and that is a fact about the grid rather than a gap in this
+// design.
+//
+// WHY HTTP/1.1 CANNOT BE MADE TO DO, in three sentences that are each
+// a hard requirement rather than a preference.  Every gRPC response
+// ends with `grpc-status` AFTER the body, because a server that has
+// streamed nine of ten responses and then fails has already sent
+// `:status: 200` — and HTTP/1.1 has trailers only in chunked transfer
+// encoding, proxies strip them routinely, and a REQUEST cannot carry
+// them at all.  A bidirectional call sends and receives at the same
+// time for minutes, and HTTP/1.1 is request then response.  A
+// client-streaming call that outran its server would have nothing to
+// push back with, because HTTP/1.1 has no per-stream flow control.
+//
+// SO THE TRANSPORT IS A TRAIT, AND THE TRAIT IS THE DELIVERABLE.
+// Publishing this package with a transport it cannot have is not a
+// pretence; it is the only way to have the interface reviewed, the
+// effect rows checked and the call shapes argued about before somebody
+// spends a month on HPACK.  The missing row is `http2-nv` —
+// `core`/`networking`: the frame layer, HPACK with its dynamic table,
+// the stream state machine, connection and stream flow control, and
+// the h2c and ALPN preludes — and grpc-codec-nv's README names it for
+// the same reason.  It is not a gRPC package: an HTTP/2 server that
+// never speaks gRPC needs exactly the same thing.
+//
+// THE SIX METHODS ARE grpc-codec-nv's OWN LIST.  Its README says what
+// a host must provide — open a stream, HEADERS in and out, DATA in and
+// out with `end_stream`, TRAILERS, per-stream flow control, and
+// RST_STREAM in both directions — and this trait is that list with
+// nothing added.  HPACK never appears: the codec hands over
+// `GrpcMetadata` and takes it back, and how those name-value pairs are
+// compressed is the transport's business entirely.
+
+// A stream identifier on a connection.
+//
+// An `Int` wrapped in a struct rather than a bare one, because HTTP/2
+// stream identifiers and gRPC status codes are both small integers and
+// a function that took two of them in either order is a function
+// somebody will call wrongly.
+pub struct GrpcStream
+    id: Int
+
+// What a transport hands back when something arrives on a stream.
+//
+// These are HTTP/2 frames with the compression already undone and
+// nothing interpreted: `GrpcMetadata` rather than an HPACK block,
+// bytes rather than a DATA frame.  `grpccall.on_headers`,
+// `.on_data`, `.on_trailers` and `.on_reset` are what they are fed
+// to, one for one.
+pub enum GrpcWire
+    // A HEADERS frame.  `end_stream` distinguishes a response head
+    // from a trailers-only response, and confusing the two is how a
+    // client waits forever for a body that is never coming.
+    GrpcWireHeaders(md: GrpcMetadata, end_stream: Bool)
+    // A DATA frame's payload.
+    GrpcWireData(data: Bytes, end_stream: Bool)
+    // A RST_STREAM, with the HTTP/2 error code as a number.
+    GrpcWireReset(http2_code: Int)
+    // The connection under this stream went away.  Distinct from a
+    // reset: a reset is the peer ending one call, and this is every
+    // call on the connection ending at once.
+    GrpcWireConnectionLost
+    // Nothing has arrived yet.  The ordinary answer on a stream that
+    // is waiting, and not a fault.
+    GrpcWireIdle
+
+// Why a transport call failed.
+//
+// Kept apart from `GrpcStatus` because a status is a call that WORKED —
+// the frames parsed, the trailers arrived, the server answered — and
+// these are the cases where none of that happened.  grpc-codec-nv's
+// README makes the same separation one layer down, and conflating them
+// is the most common mistake in gRPC client code.
+pub enum GrpcTransportFault
+    // The socket, the TLS session or the connection setup failed.
+    GrpcWireIoFailed(cause: IoError)
+    // The peer's SETTINGS, or its ALPN, said it does not speak HTTP/2.
+    GrpcWireNotHttp2(detail: Str)
+    // A GOAWAY arrived: the connection is closing and streams above
+    // `last_stream` were never processed, which is what makes them
+    // safe to retry even for a non-idempotent method.
+    GrpcWireGoAway(http2_code: Int, last_stream: Int)
+    // The connection's stream limit is reached and no new call may
+    // start until one finishes.
+    GrpcWireStreamsExhausted(limit: Int)
+    // The peer's flow-control window is closed and has been for longer
+    // than the caller allows.
+    GrpcWireWindowStalled(waited_ms: Int)
+
+// An HTTP/2 connection a gRPC call can be driven over.
+//
+// `e` is the effect row the implementation supplies, and it is what
+// every call in `grpcinvoke` and `grpcserve` costs.  A real transport
+// over a socket will be `[io, net]`; one over TLS `[net]`; one over a
+// recorded conversation in a test, nothing at all.
+//
+// **Nothing in this project implements it.**  The module comment says
+// why and names the row that would.
+pub trait GrpcTransport[e]
+    // Start a stream.  The client picks the identifier under HTTP/2's
+    // rules — odd, increasing — and the transport is what knows the
+    // next one, which is why this answers a `GrpcStream` rather than
+    // taking one.
+    fn grpc_open(self) -> Result<GrpcStream, GrpcTransportFault> [e]
+    // Send a HEADERS frame.  The pairs are `GrpcMetadata` with the
+    // pseudo-headers first, which is the order HTTP/2 requires; HPACK
+    // is the transport's.
+    fn grpc_send_headers(self, s: GrpcStream, md: GrpcMetadata, end_stream: Bool) -> Result<Unit, GrpcTransportFault> [e]
+    // Send a DATA frame.  A transport that cannot send it all because
+    // of the flow-control window answers how much it took, and the
+    // caller sends the rest — which is the whole of flow control from
+    // this package's side.
+    fn grpc_send_data(self, s: GrpcStream, data: Bytes, end_stream: Bool) -> Result<Int, GrpcTransportFault> [e]
+    // Send TRAILERS — a HEADERS frame with `end_stream` set.  A
+    // separate method from `grpc_send_headers` because a transport
+    // has to know which it is: trailers may not carry pseudo-headers,
+    // and a stream may send exactly one set.
+    fn grpc_send_trailers(self, s: GrpcStream, md: GrpcMetadata) -> Result<Unit, GrpcTransportFault> [e]
+    // Take whatever has arrived on a stream, or `GrpcWireIdle`.
+    fn grpc_receive(self, s: GrpcStream) -> Result<GrpcWire, GrpcTransportFault> [e]
+    // Send a RST_STREAM.  What a cancelled call and an expired
+    // deadline both end with, and what makes a server stop working on
+    // something nobody is waiting for.
+    fn grpc_reset(self, s: GrpcStream, http2_code: Int) -> Result<Unit, GrpcTransportFault> [e]
+    // Whether the connection is usable.  The one method with no effect
+    // row: a channel asks it before every call, and a question that
+    // costs `[io]` is a question callers start caching.
+    fn grpc_is_open(self) -> Bool
+
+// HTTP/2's NO_ERROR, 0x0 — a stream ending because it is finished.
+pub const H2_NO_ERROR = 0x0
+
+// HTTP/2's CANCEL, 0x8 — what a cancelled gRPC call resets with.
+pub const H2_CANCEL = 0x8
+
+// HTTP/2's INTERNAL_ERROR, 0x2.
+pub const H2_INTERNAL_ERROR = 0x2
+
+// HTTP/2's REFUSED_STREAM, 0x7.
+//
+// The one code that makes a retry safe for a non-idempotent method:
+// it means the server had not begun processing, so sending the request
+// again cannot do the work twice.
+pub const H2_REFUSED_STREAM = 0x7
+
+// The ALPN protocol identifier for HTTP/2 over TLS, `h2`.
+//
+// A gRPC client that did not offer it in ALPN gets an HTTP/1.1
+// connection from every conforming server, and then fails on the first
+// trailers.
+pub const ALPN_H2 = "h2"
+
+// The status a transport fault maps to, for a caller that has to
+// report one status whatever happened.
+//
+// grpc-codec-nv's `grpcstatus.status_of_stream_reset` does this for a
+// reset code; this is the same question asked of the wider type.  A
+// GOAWAY above `last_stream` and a REFUSED_STREAM both become
+// `GrpcUnavailable`, which is the one status `is_retryable` says yes
+// to — so the safe-to-retry cases and the retryable status agree by
+// construction rather than by a table somebody keeps in step.
+//
+// ```novo
+// use grpctrans
+//
+// fn main() [io]
+//     let s = grpctrans.status_of_fault(GrpcWireStreamsExhausted(100))
+//     println(grpcstatus.status_name(s))
+// ```
+pub fn status_of_fault(f: GrpcTransportFault) -> GrpcStatus []
+    todo("grpc-nv.grpctrans.status_of_fault")
+
+// True when this fault means the server had NOT begun processing, so
+// the request may be sent again even if the method is not idempotent.
+//
+// Two cases and no others: a REFUSED_STREAM, and a stream above the
+// `last_stream` in a GOAWAY.  Everything else — a reset mid-call, a
+// socket that went, a window that stalled — may have been processed,
+// and retrying it is how a payment gets taken twice.
+//
+// ```novo
+// use grpctrans
+//
+// fn main() [io]
+//     println("${grpctrans.never_processed(GrpcWireGoAway(0, 5), 9)}")
+// ```
+pub fn never_processed(f: GrpcTransportFault, s: Int) -> Bool []
+    todo("grpc-nv.grpctrans.never_processed")
+
+// The one-line reading, for a log or a person.
+//
+// ```novo
+// use grpctrans
+//
+// fn main() [io]
+//     let f: GrpcTransportFault = GrpcWireStreamsExhausted(100)
+//     println(f.message())
+// ```
+impl Error for GrpcTransportFault
+    fn message(self) -> Str
+        todo("grpc-nv.grpctrans.message")
