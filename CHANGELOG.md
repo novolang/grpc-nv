@@ -5,6 +5,10 @@ All notable changes to grpc-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.0.2 — 2026-09-15
+
+README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.
+
 ## 0.0.1 — 2026-09-11
 
 The **interface**: every signature and every effect row, and no bodies.
@@ -62,3 +66,20 @@ The **interface**: every signature and every effect row, and no bodies.
   flow control, which a device that could afford would not need gRPC.
 - **Two `core` dependencies**, grpc-codec-nv and protobuf-nv, both
   interfaces themselves today.
+
+### Design notes
+
+- The implementations this interface was checked against are `tonic`
+  (Rust) for the client and server shapes and `grpcio` for the channel
+  vocabulary, with `PROTOCOL-HTTP2.md` and `grpc/status.proto` as the
+  specification.
+- Three things change in the port. `tonic` is built on `hyper` and
+  `tower`, so its transport is a concrete HTTP/2 client and its
+  middleware is a service stack; here the transport is a trait and
+  there is no middleware, so nothing in this package chooses an async
+  runtime for a program that depends on it. `tonic`'s `Request<T>` and
+  `Response<T>` are generic over the message type; here a message is
+  `Bytes` and the generated stub converts, which keeps
+  `GrpcMethodStub` a value that can sit in a list. Its `Duration`
+  deadlines become nanosecond integers taken as arguments, which makes
+  the deadline arithmetic a table a test asserts.

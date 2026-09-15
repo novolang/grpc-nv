@@ -1,267 +1,348 @@
 # grpc-nv
 
-**Status: NOT IMPLEMENTED — interface only.**
+gRPC is a remote procedure call protocol in which one call is one HTTP/2
+stream. It is specified in
+[gRPC over HTTP/2](https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md).
+This package is the client and the server: the party that opens a stream,
+sends what the protocol says to send, and reads what arrives. The protocol
+arithmetic underneath it is
+[grpc-codec-nv](https://novo-lang.org/packages/grpc-codec-nv)'s, the
+stream it runs on is
+[http2-nv](https://novo-lang.org/packages/http2-nv)'s, and the messages
+that travel on it are
+[protobuf-nv](https://novo-lang.org/packages/protobuf-nv)'s.
 
-Every public function below is published with its signature and its
-effect row, and every body is `todo()`.  Installing this package works;
-calling it panics with `not implemented`.
+**Status: NOT IMPLEMENTED — interface only.** Every function is declared
+with its full signature, but every body is a `todo()` that panics when
+called. The package is published so its design can be reviewed and
+depended on before it is implemented. Version 0.1.0 will be the first
+working release.
 
-**And there is a second thing to say plainly: there is no HTTP/2
-implementation in this project, so even when the bodies land this
-package connects to nothing until `http2-nv` exists.**  The transport
-is a trait — `grpctrans.GrpcTransport[e]` — and nothing implements it.
-The section below says why that is the right shape rather than a
-placeholder.
+## What the host half of gRPC is
 
-## What this is
+grpc-codec-nv holds the whole protocol and performs none of it. Every
+call into it answers the events a caller has learned and a list of
+**actions**: send these headers, send these bytes, send these trailers,
+end the stream, reset the stream. This package is the party that carries
+out that list, and a host that carries it out in order has implemented
+gRPC.
 
-The host half of gRPC.  grpc-codec-nv turns a call into a state machine
-that says what the host must send; this package is the host that sends
-it — the four call shapes as values a loop pumps, deadlines against a
-real clock, metadata merged in the right order, retries that know when
-a request was never processed, a channel that outlives its connection,
-a server's routing, and the contract protobuf-nv's generator emits
-against.
+What it carries the list out over is a **transport**: one HTTP/2
+connection, expressed here as the trait `grpctrans.GrpcTransport`. The
+trait has seven methods. Six are grpc-codec-nv's own list of what a host
+must supply, and the seventh asks whether the connection is still usable.
+HPACK does not appear in any of them, because the codec hands over
+header name-value pairs and takes the same back. No package implements
+the trait today. http2-nv is the HTTP/2 connection an implementation
+will be written over, and it is an interface release itself.
 
-## Adding it, and checking it
+A **channel** is one endpoint and the policy every call on it uses: the
+size limits, the metadata every request carries, the default deadline,
+the compression offered, and the retry rules. A channel holds no socket,
+so it outlives the connection under it. The transport is an argument to
+every function that performs, never a field.
 
-```bash
-novo pkg add grpc-nv        # into your novo.toml
-novo pkg build              # type- and effect-check the package
-novo test --isolate tests/grpcinvoke_tests.nv
+There are four call shapes, and they are two flags on a method
+descriptor. The protocol document defines them under *Requests*.
+
+| Shape | Client sends | Server sends |
+| --- | --- | --- |
+| unary | one message | one message |
+| server streaming | one message | any number |
+| client streaming | any number | one message |
+| bidirectional | any number | any number |
+
+A **deadline** has two spellings. On the wire it is `grpc-timeout`, a
+duration counted from receipt, so the two ends need no agreement about
+the clock. Inside a process it is an absolute nanosecond reading, because
+a machine's own clock is consistent with itself. `grpcchan.now_nanos` is
+the one function here that reads a clock. Every other function takes the
+reading as an argument.
+
+A **retry** is a second execution of the same request. The policy this
+package applies is gRPC's own, from its service config, with the field
+names gRPC uses: `max_attempts`, `initial_backoff_ms`, `max_backoff_ms`,
+a multiplier as a fraction, and the list of statuses worth retrying. A
+call becomes **committed** when a response message has been delivered to
+the caller, and a committed call is never retried.
+
+Five constants name the HTTP/2 numbers a gRPC call uses. The codes are
+RFC 9113 section 7's, and `h2` is the protocol identifier a client must
+offer in ALPN to get an HTTP/2 connection.
+
+| Constant | Value |
+| --- | --- |
+| `H2_NO_ERROR` | `0x0` |
+| `H2_INTERNAL_ERROR` | `0x2` |
+| `H2_REFUSED_STREAM` | `0x7` |
+| `H2_CANCEL` | `0x8` |
+| `ALPN_H2` | `"h2"` |
+
+Two functions declare a concrete effect and the rest do not.
+
+| Function | Declared effects |
+| --- | --- |
+| `grpcchan.now_nanos` | `[time]` |
+| `grpcchan.dial_tls` | `[net]` |
+| `grpcinvoke.pump`, `.send`, `.finish_sending`, `.cancel`, `.unary`; `grpcserve.pump`, `.send_head`, `.send`, `.finish` | whatever the transport declares |
+| everything else | none |
+
+## Install
+
+```
+novo pkg add grpc-nv
 ```
 
-`novo test` is red today and that is the point of the release: every
-assertion fails with `not implemented: grpc-nv.<module>.<fn>`.  They
-turn green one at a time as bodies land.
-
-## The one example that will work
+## Example
 
 ```novo
 use grpcchan
-use grpcinvoke
-use grpcstub
+use grpctrans
+use grpcstatus
 
-// A unary call, once a transport exists.  Every deadline decision in
-// it is made from one clock reading the caller took.
-fn say_hello<T: GrpcTransport[e]>(t: T, set: PbFileSet, body: Bytes) -> Result<GrpcUnaryResult, GrpcCallError> [e, time]
-    let c = grpcchan.with_deadline(
-        grpcchan.channel(grpcchan.endpoint("https", "api.example.com", 443)),
-        5000000000)
-    let now = grpcchan.now_nanos()
-    let s = grpcstub.method_stub(set, "helloworld.Greeter", "SayHello") ?? nothing_stub()
-    let i = grpcstub.invoke(s, c, grpcmeta.empty(), 0, now)!
-    grpcinvoke.unary(i, t, body, now)
+fn main() [io, time]
+    // A channel is one endpoint and its policy. Nothing is opened
+    // here: the transport is an argument to every call that performs.
+    let base = grpcchan.channel(grpcchan.endpoint("https", "api.example.com", 443))
+
+    // Five seconds is the budget a call gets when it names none, and
+    // this channel retries the statuses gRPC's own policy retries.
+    let c = grpcchan.with_retries(grpcchan.with_deadline(base, 5000000000),
+                                  grpcchan.default_retries())
+
+    // How long to wait before the first retry. The jitter factor is
+    // an argument, given in thousandths, so the number is testable.
+    println("${grpcchan.backoff_ms(c.options.retry, 1, 1000)} ms")
+
+    // One clock reading starts the call, and every later decision is
+    // arithmetic over it.
+    let started = grpcchan.now_nanos()
+    let at = grpcchan.deadline_at(started, c.options.default_deadline_nanos)
+    println("${grpcchan.deadline_passed(at, started)}")   // false
+
+    // What a proxy forwards: what is left of the deadline, not what
+    // arrived. Five seconds arrived and one has gone.
+    println("${grpcchan.forwarded_deadline(5000000000, 1000000000)}")
+
+    // A transport fault is not a status. This is the status to report
+    // when one must be reported, and whether the request can be sent
+    // again: the stream was above the GOAWAY's last one, so it was
+    // never processed.
+    let f: GrpcTransportFault = GrpcWireGoAway(0, 5)
+    println(grpcstatus.status_name(grpctrans.status_of_fault(f)))
+    println("${grpctrans.never_processed(f, 9)}")   // true
 ```
 
-## The missing transport, and why the trait is the deliverable
+Build and test with `novo pkg build` and `novo test`. Today `novo test`
+fails on purpose: every test reaches a
+`not implemented: grpc-nv.<module>.<fn>` panic. The tests are the
+specification the implementation will have to satisfy.
 
-HTTP/1.1 cannot carry gRPC, and the three reasons are hard
-requirements rather than preferences:
+## What the package contains
 
-- **Trailers.**  Every gRPC response ends with `grpc-status` *after*
-  the body, because a server that has streamed nine of ten responses
-  and then fails has already sent `:status: 200`.  HTTP/1.1 has
-  trailers only in chunked transfer encoding, proxies strip them
-  routinely, and a *request* cannot carry them at all.
-- **Two independent directions.**  A bidirectional call sends and
-  receives at the same time for minutes.  HTTP/1.1 is request then
-  response.
-- **Per-stream flow control.**  A client-streaming call that outran its
-  server would have nothing to push back with.
-
-So `std.http` is not a dependency and neither is http-codec-nv — the
-plan's row for this package says "over grpc-codec-nv and std.http", and
-that half of the row does not survive contact with the protocol.
-grpc-codec-nv's README names the row that is actually missing:
-**`http2-nv`**, `core`/`networking` — the frame layer (HEADERS, DATA,
-SETTINGS, WINDOW_UPDATE, RST_STREAM, GOAWAY, PING), HPACK with its
-dynamic table, the stream state machine, connection and stream flow
-control, and the h2c and ALPN preludes.  It is not a gRPC package: an
-HTTP/2 server that never speaks gRPC needs exactly the same thing.
-
-Publishing this package with a transport it cannot have is not a
-pretence.  It is the only way to have the interface reviewed, the
-effect rows checked by the compiler and the call shapes argued about
-before somebody spends a month on HPACK — which is the whole premise of
-the interfaces-first milestone.  `grpctrans.GrpcTransport[e]` has six
-methods and they are grpc-codec-nv's own list of what a host must
-provide, with nothing added.
-
-`grpcchan.dial_tls` is the one piece the standard library *can* supply
-today: a TLS session with `h2` offered in ALPN.  It answers a handle
-rather than a transport, and the README says so rather than the
-signature pretending otherwise.
-
-## The layer, and why
-
-`host`, and only two functions name a concrete effect.
-
-| module | row | why |
-| --- | --- | --- |
-| `grpcchan.now_nanos` | `[time]` | the one function in the package that reads a clock |
-| `grpcchan.dial_tls` | `[net]` | `std.tls`'s own row |
-| `grpcinvoke.pump`, `.send`, `.finish_sending`, `.cancel`, `.unary`; `grpcserve.pump`, `.send_head`, `.send`, `.finish` | `[e]` | effect-POLYMORPHIC over the transport |
-| everything else — the channel, the policy, the routing, the stub contract, the deadline arithmetic | `[]` | values |
-
-That is unusually narrow for a `host` package, and it is a consequence
-rather than a goal: a package whose transport does not exist cannot
-name the transport's effects, so it names a parameter instead.
-
-## The load-bearing interface
-
-`GrpcTransport[e]`, and the fact that it is the whole of what this
-package needs from a machine.
-
-```novo
-pub trait GrpcTransport[e]
-    fn grpc_open(self) -> Result<GrpcStream, GrpcTransportFault> [e]
-    fn grpc_send_headers(self, s: GrpcStream, md: GrpcMetadata, end_stream: Bool) -> Result<Unit, GrpcTransportFault> [e]
-    fn grpc_send_data(self, s: GrpcStream, data: Bytes, end_stream: Bool) -> Result<Int, GrpcTransportFault> [e]
-    fn grpc_send_trailers(self, s: GrpcStream, md: GrpcMetadata) -> Result<Unit, GrpcTransportFault> [e]
-    fn grpc_receive(self, s: GrpcStream) -> Result<GrpcWire, GrpcTransportFault> [e]
-    fn grpc_reset(self, s: GrpcStream, http2_code: Int) -> Result<Unit, GrpcTransportFault> [e]
-    fn grpc_is_open(self) -> Bool
-```
-
-Six methods, and HPACK appears in none of them: the codec hands over
-`GrpcMetadata` and takes it back, and how those pairs are compressed is
-the transport's business entirely.  `grpc_send_data` answers **how
-many** bytes the peer's window took, which is the whole of flow control
-from this side and the one thing HTTP/1.1 has no way to express.
-
-The second decision is that **a status is not a transport fault**, and
-they are different types here exactly as they are in the codec.
-`NOT_FOUND` is a call that *worked* — the stream opened, the frames
-parsed, the trailers arrived — and it comes back as `GrpcTrailers`
-inside an `Ok`.  `GrpcCallError` is only the cases where the
-conversation itself failed.  A function that returned one type for both
-is what makes a caller retry a business-logic refusal, which is the
-most common mistake in gRPC client code.
-
-## Deadlines, and the subtraction a proxy owes
-
-`grpc-timeout` is a **duration from receipt**, not an instant — which
-is what lets a call cross a machine whose clock is wrong.  Forwarding
-one unchanged gives the next hop the whole budget again, and a chain of
-five proxies multiplies the deadline by five.
-`grpcchan.forwarded_deadline` is that subtraction, published so a proxy
-has a function to call rather than arithmetic to get right, and
-`grpcserve.deadline_of` is what a handler that is itself a client reads
-before it makes its own call.
-
-Inside the process a deadline is an absolute nanosecond reading and on
-the wire it is a duration.  The two spellings exist because a machine's
-own clock is consistent with itself and two machines' clocks are not.
-
-## Retries, and the narrow definition of safe
-
-Three things have to agree before a call is retried, and
-`grpcinvoke.next_attempt` is the one place they are made to:
-
-1. the channel's policy retries this status — `UNAVAILABLE` and by
-   default nothing else, which is also `grpcstatus.is_retryable`'s
-   answer;
-2. the attempt budget has room;
-3. the call is **not committed** — no response message has been
-   delivered, because a retry after one would deliver a stream twice.
-
-And for a non-idempotent method there is a fourth, narrower question:
-was the request ever processed?  `grpctrans.never_processed` says yes
-for exactly two cases — a `REFUSED_STREAM`, and a stream above the
-`last_stream` in a GOAWAY — and no for everything else.  A reset
-mid-call, a socket that went, a deadline that passed: all of those may
-have been processed, and retrying them is how a payment gets taken
-twice.
-
-## The stub contract
-
-protobuf-nv's `pbgen` turns a `.proto` into novo-lang source.  What it
-must **not** do is invent a calling convention: if a generated client
-chose its own arguments, every change here would be a change to every
-generated file, and a generated file is one nobody edits.
-
-So the convention is in `grpcstub`, and a generated stub is the
-thinnest possible layer over it: a `GrpcMethodStub` built once at
-module level from the descriptor, and one function per method whose
-body is one call into this package.  A generated file never touches
-`GrpcCall`, `GrpcAction` or a frame.
-
-`types_agree` is there for the failure that otherwise shows up at the
-worst moment: a generated file regenerated for one `.proto` and linked
-against another, which appears as a decode failure on a field number
-nobody recognises.
-
-## What this does not do, on purpose
-
-- **It does not implement HTTP/2.**  That is `http2-nv`, and it does
-  not exist.
-- **It does not own a loop**, a thread, a channel or a callback.  A
-  handler is not a function this package calls; `GrpcExchange` is a
-  value the server's own loop drives.
-- **It does not compress.**  The codec's flag says *that* a message is
-  compressed and `grpc-encoding` says with what; the bytes are the
-  host's to inflate, with flate-nv or whatever the header named, and a
-  package that chose an algorithm would be choosing for a protocol
-  whose whole point is that two ends negotiate one.
-- **It does not implement the health or reflection service.**  Both are
-  named — `grpcserve.health_service_name`,
-  `grpcstub.reflection_service_name` — and a server with `route` and
-  `is_serving` has everything it needs.  What this package would add is
-  a decision about what "healthy" means and which descriptors to
-  expose, and both are a deployment's.
-- **It does not do load balancing or name resolution.**  A channel is
-  one endpoint; a pool over several is a program's.
-- **It does not parse a service config.**  `GrpcRetryPolicy` is a value
-  with gRPC's own field names; turning JSON into one is a caller's.
-- **No device claim.**  gRPC needs HTTP/2, which needs HPACK's dynamic
-  table and per-stream flow control, and a device that could afford
-  those would not be using gRPC.  grpc-codec-nv's README says the same
-  and names what an embedded producer should reach for instead.
-
-## The reference implementation
-
-`tonic` for the client and server shapes and `grpcio` for the channel
-vocabulary, with gRPC's own `PROTOCOL-HTTP2.md` and `grpc/status.proto`
-as the specification.
-
-Three things change in the port.  `tonic` is built on `hyper` and
-`tower`, so its transport is a concrete HTTP/2 client and its
-middleware is a service stack; here the transport is a trait and there
-is no middleware at all, because a `host` package that brought an async
-runtime with it would be choosing one for every program that depends on
-it.  Its `Request<T>` and `Response<T>` are generic over the message
-type; here a message is `Bytes` and the generated stub converts, which
-is what keeps `GrpcMethodStub` a value that can sit in a list.  And its
-`Duration` deadlines become nanosecond integers taken as arguments,
-which is what makes the deadline arithmetic — including a proxy's
-subtraction — a table a test asserts.
-
-## Status
-
-| item | implemented |
+| Module | Contents |
 | --- | --- |
-| `grpctrans` — `GrpcTransport[e]`, `GrpcStream`, `GrpcWire`, `GrpcTransportFault` | types only |
-| `grpctrans.H2_NO_ERROR`, `.H2_CANCEL`, `.H2_INTERNAL_ERROR`, `.H2_REFUSED_STREAM`, `.ALPN_H2` | yes — they are constants |
+| `grpctrans` | The HTTP/2 transport as a trait, what arrives on a stream, why a transport call failed, and the HTTP/2 error codes a gRPC call uses. |
+| `grpcchan` | A channel: an endpoint, the policy every call on it uses, the retry policy and its backoff, the clock reading, and the deadline arithmetic including the subtraction a proxy owes. |
+| `grpcinvoke` | The client. One invocation for all four call shapes, the turn that performs the codec's actions and reads what arrived, a flow-controlled send that spans turns, and the retry decision. |
+| `grpcserve` | The server. A routing table over descriptors, the trailers-only answer for a path it does not serve, one exchange as a value the server's own loop drives, and the flag a health check reads. |
+| `grpcstub` | The contract a generated client is written against, so a generated file calls one function here and never touches a call, an action or a frame. |
+| `grpcfault` | `GrpcCallError`, which is every way a call could not be conducted, and never a status a server returned. |
+
+## How to choose an entry point
+
+**`grpcinvoke.unary` is the whole of a unary call.** It sends one
+message, half-closes, pumps until the trailers arrive, and answers the
+response and the status. Most calls are this one.
+
+**`grpcinvoke.pump` is the turn underneath it.** Use it for a streaming
+call, and for any program that does something of its own between turns.
+`send`, `finish_sending` and `cancel` are the verbs beside it, and each
+answers the events of that turn and how long the caller may wait before
+the next.
+
+**`grpcstub.invoke` is what generated code calls.** A generated client
+builds a `GrpcMethodStub` once from a descriptor and then calls this,
+which is why a change to the calling convention is not a change to every
+generated file.
+
+**`grpcserve.exchange` is the server's entry point.** It turns a stream's
+request headers into a value, and `pump`, `send_head`, `send` and
+`finish` drive it. The handler is not a function this package calls: the
+exchange is a value the server's own loop owns.
+
+## The rules a user needs
+
+1. **A transport fault is not a status.** `NOT_FOUND` is a call that
+   worked, and it arrives as a `GrpcTrailers` inside an `Ok`.
+   `GrpcCallError` is only the cases where the conversation itself
+   failed. A caller that folded the two together retries a business
+   refusal.
+2. **Three things must agree before a retry, and `next_attempt` is where
+   they do.** The channel's policy must retry this status, the attempt
+   budget must have room, and the call must not be committed.
+   Commitment is gRPC's own term for a call that has delivered a
+   response message, from its retry design, proposal A6. Retrying a
+   committed call delivers a stream twice.
+3. **For a method that is not idempotent there is a fourth question.**
+   `grpctrans.never_processed` answers it, and it says yes for exactly
+   two cases: a `REFUSED_STREAM`, and a stream whose identifier is above
+   the `last_stream` in a GOAWAY (RFC 9113 section 6.8). A reset
+   mid-call, a socket that went and a deadline that passed may all have
+   been processed.
+4. **Retries are off by default.** `grpcchan.default_options` uses
+   `no_retries`, which is one attempt. `default_retries` is gRPC's
+   suggested policy: five attempts, 100 ms doubling to one second,
+   retrying `UNAVAILABLE` and nothing else.
+5. **The backoff jitter is an argument, not a draw.** `backoff_ms` takes
+   a factor between 800 and 1200, in thousandths. gRPC's algorithm
+   multiplies the backoff by a random factor between 0.8 and 1.2, and
+   the random number is the caller's to supply.
+6. **A deadline is an instant in the process and a duration on the
+   wire.** Read the clock once with `now_nanos`, turn it into an instant
+   with `deadline_at`, and pass that reading to every function that
+   needs it.
+7. **A proxy forwards what is left.** `grpc-timeout` is a duration from
+   receipt, so a chain of five proxies that forward it unchanged
+   multiplies the budget by five. `grpcchan.forwarded_deadline` is the
+   subtraction, and `grpcserve.deadline_of` is what a handler that is
+   itself a client reads first.
+8. **A client must offer `h2` in ALPN.** A client that does not gets an
+   HTTP/1.1 connection from every conforming server, and fails on the
+   first trailers. `grpctrans.ALPN_H2` is the identifier.
+9. **`dial_tls` answers a handle, not a transport.** It opens a TLS
+   session with `h2` offered. Speaking HTTP/2 over that session is the
+   transport's work, and no package here does it yet.
+10. **A path this server does not serve is answered with one header
+    set.** Section *Trailers-Only*. `grpcserve.unimplemented_response`
+    builds it: `grpc-status: 12`, and `end_stream`. A server that sent a
+    normal response head first leaves a conforming client waiting for a
+    body that is never sent.
+11. **Every response ends with trailers, including the successful
+    ones.** Section *Responses*. `grpcserve.finish` is that ending. A
+    server that sent a body and stopped has sent a call that never
+    finishes.
+12. **A client-streaming call must half-close.** `finish_sending` is
+    what says there are no more request messages. A call that never
+    half-closes is a call the server waits on forever.
+13. **A send can span turns.** `grpc_send_data` answers how many bytes
+    the peer's flow-control window took, and the rest of that message is
+    sent on a later turn. A `GrpcWindowClosed` event with a non-zero
+    `wait_ms` is the peer pushing back.
+14. **A message is `Bytes`, already serialised.** This package does not
+    know what a message means. The generated encoder and decoder are
+    named on the stub, and `grpcstub.types_agree` checks that they name
+    the types the descriptor says they should.
+15. **The server's deadline ceiling replaces a longer one.**
+    `GrpcServerOptions.max_deadline_nanos` is the longest deadline this
+    server honours. Zero honours whatever arrives.
+
+## What is not included
+
+- **HTTP/2.** The transport is the trait `grpctrans.GrpcTransport`, and
+  no package implements it yet.
+  [http2-nv](https://novo-lang.org/packages/http2-nv) publishes the
+  connection an implementation will be written over. Until one exists,
+  this package builds and type-checks and connects to nothing.
+- **A loop, a thread or a callback.** A handler is not a function this
+  package calls. `GrpcExchange` and `GrpcInvocation` are values the
+  calling program's own loop drives.
+- **Compression.** The frame's flag says that a message is compressed
+  and `grpc-encoding` says with what. Inflating the bytes is the calling
+  program's work.
+- **The health and reflection services.** Both are named —
+  `grpcserve.health_service_name` and
+  `grpcstub.reflection_service_name` — and neither is implemented. A
+  server with `route` and `is_serving` has what it needs. What a health
+  service adds is a decision about what "healthy" means, and what a
+  reflection service adds is a decision about which descriptors to
+  expose.
+- **Load balancing and name resolution.** A channel is one endpoint. A
+  pool over several is the calling program's.
+- **A service config parser.** `GrpcRetryPolicy` is a value with gRPC's
+  own field names. Turning JSON into one is the calling program's work.
+- **A microcontroller claim.** gRPC needs HPACK's dynamic table and
+  per-stream flow control, which a device with no heap allocator cannot
+  afford.
+
+## Related packages
+
+- [grpc-codec-nv](https://novo-lang.org/packages/grpc-codec-nv) is the
+  core half of the same protocol, and the other end of this one. It
+  holds the framing, the status codes, the metadata rules, the deadline
+  grammar and the call state machine, and it performs nothing. This
+  package depends on it and does no protocol arithmetic of its own.
+- [http2-nv](https://novo-lang.org/packages/http2-nv) is the transport
+  that carries a gRPC call: the frame types, HPACK, the stream state
+  machine and flow control, with no socket of its own. It is what
+  `grpctrans.GrpcTransport` will be implemented over.
+- [protobuf-nv](https://novo-lang.org/packages/protobuf-nv) supplies the
+  descriptors a service is described by and the generator whose output
+  `grpcstub` defines the contract for.
+- [http-codec-nv](https://novo-lang.org/packages/http-codec-nv) is
+  HTTP/1.1, and so is `std.http` in the standard library. Neither can
+  carry gRPC: a request may not carry trailers, the two directions are
+  not independent, and there is no per-stream flow control.
+- [websocket-nv](https://novo-lang.org/packages/websocket-nv) and
+  [mqtt-nv](https://novo-lang.org/packages/mqtt-nv) are the other host
+  halves shaped this way, each over its own codec package, for a program
+  that wants a message stream rather than a remote procedure call.
+- `std.tls` in the standard library is what `grpcchan.dial_tls` opens a
+  session with, and `std.time` is what `grpcchan.now_nanos` reads.
+
+## Tests
+
+```bash
+novo test tests/grpcinvoke_tests.nv     # 20 tests: the channel, the call, the retry
+novo test tests/grpcserve_tests.nv      # 15 tests: the routing, the stub, the faults
+```
+
+The values the suite asserts against are gRPC's own: the request header
+set and the `Timeout` grammar from `PROTOCOL-HTTP2.md`, the status codes
+from `grpc/status.proto`, the retry policy's defaults and its backoff
+curve from gRPC's retry design, and the HTTP/2 error codes from RFC 9113
+section 7. The suite checks that a channel holds no connection, that the
+metadata order is the channel's then the call's then the timeout, that a
+proxy forwards what is left of a deadline, that a committed call is never
+retried, that exactly two faults make a non-idempotent retry safe, and
+that an unroutable path is answered with one header set.
+
+Each suite carries a transport over values in memory, which performs
+nothing. It is the only implementation of `GrpcTransport` that exists
+anywhere today, so a green suite here would not mean a call has reached a
+server. The compiler makes the first assertion on its own: that transport
+declares no effects, and the call verbs driven over it declare none
+either, so the effect parameter is checked before the run starts.
+
+The tests compile today and fail at run, each on the `not implemented:
+grpc-nv.<module>.<fn>` panic that is its body. That is the expected state
+of an interface release. They turn green one at a time as bodies land.
+
+## Implementation status
+
+| Item | Implemented |
+| --- | --- |
+| `grpctrans.H2_NO_ERROR`, `.H2_CANCEL`, `.H2_INTERNAL_ERROR`, `.H2_REFUSED_STREAM`, `.ALPN_H2` | yes (they are constants) |
 | `grpctrans.status_of_fault`, `.never_processed`, the `message` impl | no |
-| `grpcchan` — `GrpcEndpoint`, `GrpcRetryPolicy`, `GrpcChannelOptions`, `GrpcChannel` | types only |
 | `grpcchan.no_retries`, `.default_retries`, `.retry_policy`, `.backoff_ms`, `.retries_status` | no |
 | `grpcchan.default_options`, `.endpoint`, `.channel` | no |
 | `grpcchan.with_options`, `.with_metadata`, `.with_deadline`, `.with_retries` | no |
 | `grpcchan.now_nanos`, `.deadline_at`, `.deadline_passed`, `.forwarded_deadline` | no |
 | `grpcchan.request_metadata`, `.dial_tls`, `.tls_for` | no |
-| `grpcinvoke` — `GrpcInvocation`, `GrpcInvokeEvent`, `GrpcInvokeStep`, `GrpcUnaryResult`, `GrpcRetryDecision` | types only |
 | `grpcinvoke.invocation`, `.pump`, `.send`, `.finish_sending`, `.cancel`, `.unary` | no |
 | `grpcinvoke.state_of`, `.trailers_of`, `.wait_ms`, `.expired` | no |
 | `grpcinvoke.next_attempt`, `.is_committed` | no |
-| `grpcserve` — `GrpcServiceEntry`, `GrpcServerOptions`, `GrpcServer`, `GrpcExchange`, `GrpcServeEvent`, `GrpcServeStep` | types only |
 | `grpcserve.default_options`, `.server`, `.route`, `.unimplemented_response` | no |
 | `grpcserve.set_serving`, `.is_serving`, `.health_service_name` | no |
 | `grpcserve.exchange`, `.pump`, `.send_head`, `.send`, `.finish` | no |
 | `grpcserve.deadline_of`, `.abandoned`, `.request_metadata` | no |
-| `grpcstub` — `GrpcMethodStub`, `GrpcEncodeFn`, `GrpcDecodeFn`, `GrpcServiceStub` | types only |
 | `grpcstub.method_stub`, `.service_stub`, `.path_of`, `.streaming_of` | no |
 | `grpcstub.invoke`, `.types_agree` | no |
 | `grpcstub.module_name_for`, `.client_fn_name`, `.server_fn_name`, `.reflection_service_name` | no |
-| `grpcfault` — `GrpcCallError`, the `message` impl | type only |
-| `grpcfault.status_of`, `.safe_to_replay`, `.reset_code_for` | no |
+| `grpcfault.status_of`, `.safe_to_replay`, `.reset_code_for`, the `message` impl | no |
+
+## Licence
+
+Apache-2.0. See `LICENSE`.
+
+<!-- docs/writing-a-readme.md is the style guide for this page. -->

@@ -1,6 +1,6 @@
 [package]
 name        = "grpc-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "The host half of gRPC, over grpc-codec-nv's action list: the four call shapes as values a host pumps, deadlines against a real clock, metadata, status mapping, retries with a backoff policy, a channel over an endpoint, a server's routing, and the stub contract protobuf-nv's generator emits.  The HTTP/2 transport is a trait nothing implements yet.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
