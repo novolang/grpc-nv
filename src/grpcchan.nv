@@ -92,6 +92,37 @@ pub struct GrpcChannel
     endpoint: GrpcEndpoint
     options: GrpcChannelOptions
 
+// The TLS options `dial_tls` opens a session with.
+//
+// THE PACKAGE DECLARES IT rather than naming a standard library type.
+// `compiler/stdlib/tls.nv` holds a struct of this shape, but it is not
+// a published surface: there is no `docs/stdlib/tls.md`, no `use`
+// brings the module into scope, and a signature naming its type
+// type-checked only while the undefined-type check did not exist.  It
+// does now, and it is `E2033`.
+//
+// AND THE NAME IS PREFIXED because struct identity is keyed by NAME
+// across a whole assembly, dependencies included: two packages that
+// each declared a bare `TlsConfig` could not be used by the same
+// program.  docs/publishing.md, "Public type names are globally
+// unique".
+//
+// `hostname` is both the SNI sent and the name the server's
+// certificate is matched against — one field, because a program that
+// could set them apart would have a way to verify the wrong name.  It
+// is the endpoint's AUTHORITY and not its host when the two differ,
+// which is what `tls_for` fills it from.
+//
+// NO ALPN FIELD.  A gRPC client that does not offer `h2` gets an
+// HTTP/1.1 connection from every conforming server and fails on the
+// first trailers — README rule 8 — so `dial_tls` offers
+// `grpctrans.ALPN_H2` and there is no way to ask it not to.  A field
+// would be a way to ask it not to.
+pub struct GrpcTlsConfig
+    hostname: Str
+    verify_peer: Bool
+    ca_bundle_path: Str
+
 // The default retry policy: one attempt, so no retries.
 //
 // Off by default because a retry is a second execution, and a library
@@ -358,7 +389,7 @@ pub fn forwarded_deadline(received_nanos: Int, elapsed_nanos: Int) -> Int []
 // fn main() [io]
 //     println(grpctrans.ALPN_H2)
 // ```
-pub fn dial_tls(c: GrpcChannel, cfg: TlsConfig) -> Result<Int, GrpcTransportFault> [net]
+pub fn dial_tls(c: GrpcChannel, cfg: GrpcTlsConfig) -> Result<Int, GrpcTransportFault> [net]
     todo("grpc-nv.grpcchan.dial_tls")
 
 // A client-side TLS configuration for this channel's authority.
@@ -371,5 +402,5 @@ pub fn dial_tls(c: GrpcChannel, cfg: TlsConfig) -> Result<Int, GrpcTransportFaul
 //     let cfg = grpcchan.tls_for(c)
 //     println(c.endpoint.authority)
 // ```
-pub fn tls_for(c: GrpcChannel) -> TlsConfig []
+pub fn tls_for(c: GrpcChannel) -> GrpcTlsConfig []
     todo("grpc-nv.grpcchan.tls_for")

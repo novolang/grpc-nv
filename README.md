@@ -143,7 +143,7 @@ specification the implementation will have to satisfy.
 | Module | Contents |
 | --- | --- |
 | `grpctrans` | The HTTP/2 transport as a trait, what arrives on a stream, why a transport call failed, and the HTTP/2 error codes a gRPC call uses. |
-| `grpcchan` | A channel: an endpoint, the policy every call on it uses, the retry policy and its backoff, the clock reading, and the deadline arithmetic including the subtraction a proxy owes. |
+| `grpcchan` | A channel: an endpoint, the policy every call on it uses, the retry policy and its backoff, the TLS options it dials with, the clock reading, and the deadline arithmetic including the subtraction a proxy owes. |
 | `grpcinvoke` | The client. One invocation for all four call shapes, the turn that performs the codec's actions and reads what arrived, a flow-controlled send that spans turns, and the retry decision. |
 | `grpcserve` | The server. A routing table over descriptors, the trailers-only answer for a path it does not serve, one exchange as a value the server's own loop drives, and the flag a health check reads. |
 | `grpcstub` | The contract a generated client is written against, so a generated file calls one function here and never touches a call, an action or a frame. |
@@ -287,8 +287,12 @@ exchange is a value the server's own loop owns.
   [mqtt-nv](https://novo-lang.org/packages/mqtt-nv) are the other host
   halves shaped this way, each over its own codec package, for a program
   that wants a message stream rather than a remote procedure call.
-- `std.tls` in the standard library is what `grpcchan.dial_tls` opens a
-  session with, and `std.time` is what `grpcchan.now_nanos` reads.
+- `grpcchan.dial_tls` opens a TLS session and answers its handle; its
+  options are `grpcchan.GrpcTlsConfig`, this package's own record,
+  because the standard library's TLS surface is not published (there is
+  no `docs/stdlib/tls.md` and no module a `use` resolves), so no package
+  can name a type from it. `std.time` is what `grpcchan.now_nanos`
+  reads.
 
 ## Tests
 
