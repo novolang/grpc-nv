@@ -70,7 +70,7 @@ fn a_service() -> PbService
 fn a_file() -> PbFile
     PbFile { name: "helloworld.proto", package: "helloworld", syntax: PbProto3,
              dependency: [], public_dependency: [], messages: [], enums: [],
-             services: [a_service()],
+             services: [a_service()], extensions: [],
              options: PbFileOptions { deprecated: false, go_package: "",
                                       java_package: "",
                                       unknown: pbunknown.empty() } }
