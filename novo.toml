@@ -1,6 +1,6 @@
 [package]
 name        = "grpc-nv"
-version     = "0.0.3"
+version     = "0.0.4"
 description = "The host half of gRPC, over grpc-codec-nv's action list: the four call shapes as values a host pumps, deadlines against a real clock, metadata, status mapping, retries with a backoff policy, a channel over an endpoint, a server's routing, and the stub contract protobuf-nv's generator emits.  The HTTP/2 transport is a trait nothing implements yet.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
@@ -44,14 +44,14 @@ novo        = ">= 0.8.9"
 # deadline grammar and the call state machine all live there, and
 # `GrpcAction` is what it hands this package to perform.  Nothing here
 # does protocol arithmetic.
-grpc-codec-nv = "^0.0.1"
+grpc-codec-nv = "^0.0.4"
 
 # The descriptors a service is described by — `PbService`, `PbMethod`,
 # `PbStreaming`, `PbFileSet` — and `pbgen`, whose generated code is
 # what `grpcstub` defines the contract for.  grpc-codec-nv already
 # depends on it; naming it here is the rule that a package declares
 # what its own signatures mention.
-protobuf-nv = "^0.0.1"
+protobuf-nv = "^0.1.0"
 
 # NOT http-codec-nv, and NOT std.http, and the absence is the whole
 # design problem this package has.  HTTP/1.1 cannot carry gRPC:

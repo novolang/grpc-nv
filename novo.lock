@@ -3,34 +3,34 @@
 [grpc-codec-nv]
 source = "registry"
 url = "https://registry.novo-lang.org"
-req = "^0.0.1"
-version = "0.0.1"
-hash = "127cf2cbb3b0450f49f3c67c5d2cfca0250a6bba3dbd502300bb010b828a3b17"
+req = "^0.0.4"
+version = "0.0.4"
+hash = "0026009cc74287518a4b367067576993628dcae3f785e8b01550ff81d6da4407"
 
 [leb128-nv]
 source = "registry"
 url = "https://registry.novo-lang.org"
-req = "^0.1.1,^0.1.5"
+req = "^0.1.1,^0.1.7"
 version = "0.1.7"
 hash = "71f3ef504785e8bb4c9d7e72151be91dcebc7e11f658552009fae7205725bd53"
 
 [protobuf-nv]
 source = "registry"
 url = "https://registry.novo-lang.org"
-req = "^0.0.1"
-version = "0.0.1"
-hash = "301ca1bcbbbeeb89873f6010c69a3d5d58664a1ec6192d1dd2b447a30142f36a"
+req = "^0.1.0"
+version = "0.1.0"
+hash = "7c92b36ba7e6306ab023edf0317ebff565848c3cd43815ee7823dc47847b9ce4"
 
 [varint-nv]
 source = "registry"
 url = "https://registry.novo-lang.org"
-req = "^0.1.4"
+req = "^0.1.6"
 version = "0.1.6"
 hash = "acedfcf25d1a81e38f2093418ba5839425b8800dd6b85dad585aa6906635f75a"
 
 [zigzag-nv]
 source = "registry"
 url = "https://registry.novo-lang.org"
-req = "^0.1.0,^0.1.4"
+req = "^0.1.0,^0.1.5"
 version = "0.1.5"
 hash = "0ed80f97d393aba2db5983514e1695b5a1cdf2739c7a681c965d6178067eca8f"
